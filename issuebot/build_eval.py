@@ -49,6 +49,21 @@ def original_text(repo: str, i: dict, comments: list[dict]) -> tuple[str, str] |
     return None if edited and first and edited > first else (title, i["body"])
 
 
+def row(repo: str, i: dict, comments: list[dict], g: tuple) -> dict | None:
+    """A dataset row (sha=None, split=None: the caller fills them), or None without a usable reply or original text."""
+    # A bare "Duplicate of #12" is the usual dup close, so the 40-char rule would filter dups out.
+    m = (next((c for c in comments if is_maint(c) and DUP_RE.search(c.get("body") or "")), None) if g[0] == "duplicate"
+         else maintainer_reply(comments))
+    if not m or not (orig := original_text(repo, i, comments)):
+        return None
+    return {"repo": repo, "number": i["number"], "url": i["html_url"], "title": orig[0],
+            "body": orig[1], "author": i["user"]["login"], "created_at": i["created_at"],
+            "sha": None, "split": None,
+            "gold_label": g[0], "gold_duplicate_of": g[1], "label_override": None,
+            "maintainer_reply": m["body"], "maintainer": m["user"]["login"],
+            "labels": [l["name"] for l in i["labels"]], "state_reason": i.get("state_reason")}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default="vitest-dev/vitest")
@@ -71,19 +86,9 @@ def main() -> None:
                     or not (i.get("body") or "").strip() or i["created_at"] > cutoff):
                 continue
             comments = gh(f"/repos/{a.repo}/issues/{i['number']}/comments", params={"per_page": 100})
-            if not (g := gold(i, comments)):
+            if not (g := gold(i, comments)) or not (r := row(a.repo, i, comments, g)):
                 continue
-            # A bare "Duplicate of #12" is the usual dup close, so the 40-char rule would filter dups out.
-            m = (next(c for c in comments if is_maint(c) and DUP_RE.search(c.get("body") or "")) if g[0] == "duplicate"
-                 else maintainer_reply(comments))
-            if not m or not (orig := original_text(a.repo, i, comments)):
-                continue
-            rows.append({"repo": a.repo, "number": i["number"], "url": i["html_url"], "title": orig[0],
-                         "body": orig[1], "author": i["user"]["login"], "created_at": i["created_at"],
-                         "sha": sha_at(src, i["created_at"], a.branch), "split": None,
-                         "gold_label": g[0], "gold_duplicate_of": g[1], "label_override": None,
-                         "maintainer_reply": m["body"], "maintainer": m["user"]["login"],
-                         "labels": [l["name"] for l in i["labels"]], "state_reason": i.get("state_reason")})
+            rows.append({**r, "sha": sha_at(src, i["created_at"], a.branch)})
             print(f"#{i['number']} {g[0]} ({len(rows)}/{a.limit})", flush=True)
             if len(rows) >= a.limit:
                 break

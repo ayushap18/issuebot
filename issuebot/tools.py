@@ -89,18 +89,24 @@ def _safe(ctx, rel: str) -> Path:
 def grep_repo(ctx, pattern: str, path: str = ".", max_results: int = 50) -> str:
     path = path or "."
     _safe(ctx, path)
-    r = subprocess.run(["git", "-C", str(ctx["dir"]), "grep", "-n", "-I", "-E", "-e", pattern, "--", path],
+    deny = [f":(exclude,glob)**/{g}" for g in (".env*", ".env*/**", "*.pem", "*.key")]  # same denylist as _safe
+    r = subprocess.run(["git", "-C", str(ctx["dir"]), "grep", "-n", "-I", "-E", "-e", pattern, "--", path, *deny],
                        capture_output=True, text=True)
     if r.returncode == 1:
         return "no matches"
     if r.returncode:
         raise RuntimeError(r.stderr.strip())
-    lines = [l for l in r.stdout.splitlines() if not any(p.startswith(".env") for p in Path(l.split(":", 1)[0]).parts)]
-    return _cap("\n".join(lines[:max(1, min(max_results, 200))]), 8000) or "no matches"
+    return _cap("\n".join(r.stdout.splitlines()[:max(1, min(max_results, 200))]), 8000) or "no matches"
 
 
 def read_file(ctx, path: str, start_line: int = 1, end_line: int | None = None) -> str:
-    lines = _safe(ctx, path).read_text(errors="replace").splitlines()
+    p = _safe(ctx, path)
+    rel = str(p.relative_to(Path(ctx["dir"]).resolve()))
+    # Tracked files only (same set git grep sees): untracked files like gha-creds-*.json can hold secrets.
+    if subprocess.run(["git", "--literal-pathspecs", "-C", str(ctx["dir"]), "ls-files", "--error-unmatch", "--", rel],
+                      capture_output=True).returncode:
+        raise ValueError(f"not a tracked file: {path}")
+    lines = p.read_text(errors="replace").splitlines()
     start = max(1, start_line or 1)
     end = min(end_line or start + 199, start + 399, len(lines))
     return _cap("\n".join(f"{i}: {lines[i - 1]}" for i in range(start, end + 1)), 16000) or "(empty range)"

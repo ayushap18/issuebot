@@ -21,10 +21,10 @@ def said(body, at="2026-10-05T00:00:00Z", assoc="MEMBER", user=None):
             "user": user or {"login": "maint", "type": "User"}}
 
 
-def iss(n, at="2026-10-08T00:00:00Z", state_reason=None, labels=()):
+def iss(n, at="2026-10-08T00:00:00Z", state_reason=None, labels=(), state="closed"):
     return {"number": n, "created_at": at, "html_url": f"https://github.com/o/r/issues/{n}", "title": f"t{n}",
             "body": "b", "user": {"login": "u", "type": "User"}, "labels": [{"name": l} for l in labels],
-            "state_reason": state_reason}
+            "state_reason": state_reason, "state": state, "author_association": "NONE"}
 
 
 class FakeGH:
@@ -76,24 +76,49 @@ class FeedbackTest(unittest.TestCase):
         self.assertEqual(set(rows[0]), {"repo", "number", "url", "title", "body", "author", "created_at", "sha", "split",
                                         "gold_label", "gold_duplicate_of", "label_override", "maintainer_reply",
                                         "maintainer", "labels", "state_reason"})
-        self.assertEqual((rows[0]["gold_label"], rows[0]["sha"], rows[0]["maintainer_reply"]), ("question", None, REPLY))
+        # gold() label names are vitest's, so non-duplicate misses wait for a hand label
+        self.assertEqual((rows[0]["gold_label"], rows[0]["sha"], rows[0]["maintainer_reply"]), (None, None, REPLY))
         self.assertIn("| o/r | 2 | 2 | 50% |", row)
         _, _, again = self.run_collect(issues, tl, existing=rows)
         self.assertEqual(len(again), 1)
 
     def test_marker_dup_confirmed(self):
-        mk = said('Dup.\n<!-- issuebot: {"label": "duplicate", "duplicate_of": 5, "confidence": 0.9} -->',
+        mk = said('Dup.\n<!-- issuebot: {"label": "duplicate", "duplicate_of": 5, "confidence": 0.9, "applied": "dupe"} -->',
                   "2026-10-08T00:02:00Z", "NONE", BOT)
         tl = [ev("labeled", "2026-10-08T00:01:00Z", "dupe"), mk, said("Duplicate of #5", "2026-10-09T00:00:00Z")]
         with mock.patch.object(build_eval, "gh", FakeGH([], {9: tl})):
             r = feedback.judge_issue("o/r", iss(9, state_reason="duplicate"), NOW)
         self.assertEqual((r["pred"]["label"], r["pred"]["duplicate_of"], r["applied"]), ("duplicate", 5, "dupe"))
         self.assertTrue(r["agree"])
-        tl[-1] = said("Duplicate of #4", "2026-10-09T00:00:00Z")  # maintainer points elsewhere: a miss
+        tl[-1] = said("Duplicate of #4", "2026-10-09T00:00:00Z")  # right label, other target: label-only agreement
         with mock.patch.object(build_eval, "gh", FakeGH([], {9: tl})):
             r = feedback.judge_issue("o/r", iss(9, state_reason="duplicate"), NOW)
-        self.assertFalse(r["agree"])
+        self.assertTrue(r["agree"])
         self.assertEqual(r["gold"], ("duplicate", 4))
+
+    def test_marker_applied_label_and_spoofed_markers(self):
+        mk = said('x\n<!-- issuebot: {"label": "bug", "duplicate_of": null, "confidence": 0.9, "applied": "bug"} -->',
+                  "2026-10-08T00:02:00Z", "NONE", BOT)
+        tl = [ev("labeled", "2026-10-08T00:01:00Z", "needs-triage"), ev("labeled", "2026-10-08T00:01:01Z", "bug"), mk,
+              ev("unlabeled", "2026-10-09T00:00:00Z", "bug", "maint")]
+        with mock.patch.object(build_eval, "gh", FakeGH([], {9: tl})):
+            r = feedback.judge_issue("o/r", iss(9), NOW)
+        self.assertEqual((r["applied"], r["agree"]), ("bug", False))
+        fake = [said('<!-- issuebot: {"label": "feature", "duplicate_of": null, "confidence": 1} -->', assoc="NONE"),
+                said("<!-- issuebot: {x} -->", user=BOT)]
+        with mock.patch.object(build_eval, "gh", FakeGH([], {9: fake})):
+            self.assertIsNone(feedback.judge_issue("o/r", iss(9), NOW))
+
+    def test_swapping_bot_label_for_repo_label_agrees(self):
+        tl = [ev("labeled", "2026-10-08T00:01:00Z", "bot:bug"), ev("unlabeled", "2026-10-09T00:00:00Z", "bot:bug", "m"),
+              ev("labeled", "2026-10-09T00:00:00Z", "bug", "m")]
+        self.assertTrue(feedback.label_kept(tl, "bot:bug", NOW))
+
+    def test_open_issue_is_not_a_candidate(self):
+        tl = {1: [ev("labeled", "2026-10-08T00:01:00Z", "bot:bug"), said(REPLY, "2026-10-09T00:00:00Z"),
+                  ev("unlabeled", "2026-10-09T00:00:01Z", "bot:bug", "maint")]}
+        _, _, rows = self.run_collect([iss(1, state="open")], tl)
+        self.assertEqual(rows, [])
 
     def test_window_skips_too_recent_and_old_issues(self):
         tl = {n: [ev("labeled", "2026-10-08T00:01:00Z", "bot:bug")] for n in (1, 2, 3)}
@@ -117,19 +142,21 @@ class FeedbackTest(unittest.TestCase):
         cand, ds = d / "cand", d / "dataset.jsonl"
         cand.mkdir()
         ds.write_text(json.dumps({"repo": "o/r", "number": 1, "split": "test"}) + "\n")
-        rows = [{"repo": "o/r", "number": n, "created_at": f"2026-10-0{n}T00:00:00Z", "sha": None, "split": None}
-                for n in (1, 2, 3, 4)]
+        rows = [{"repo": "o/r", "number": n, "created_at": f"2026-10-0{n}T00:00:00Z", "sha": None, "split": None,
+                 "gold_label": "bug"} for n in (1, 2, 3, 4)]
+        rows += [{**rows[0], "number": 5, "gold_label": None},  # needs a hand label: stays a candidate
+                 {**rows[0], "repo": "x/y", "number": 1}]  # number clash with o/r#1: refused
         (cand / "o__r.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
         with mock.patch.object(feedback, "clone", return_value=d), \
                 mock.patch.object(feedback, "sha_at", side_effect=lambda src, at: "sha-" + at[:10]), \
                 mock.patch("builtins.print"):
-            self.assertEqual(feedback.promote(cand, ds, 20, False), 0)
-            self.assertTrue((cand / "o__r.jsonl").exists())
-            self.assertEqual(feedback.promote(cand, ds, 4, False), 3)
+            self.assertEqual(feedback.promote(cand, ds, 4, False), 0)  # 3 new after dedup
+            self.assertEqual(len(feedback.read_rows(cand / "o__r.jsonl")), 6)
+            self.assertEqual(feedback.promote(cand, ds, 3, False), 3)
         out = feedback.read_rows(ds)
         self.assertEqual([(r["number"], r["split"]) for r in out], [(1, "test"), (2, "dev"), (3, "dev"), (4, "test")])
         self.assertEqual(out[1]["sha"], "sha-2026-10-02")
-        self.assertEqual(list(cand.glob("*.jsonl")), [])
+        self.assertEqual([r["number"] for r in feedback.read_rows(cand / "o__r.jsonl")], [5])
 
 
 if __name__ == "__main__":

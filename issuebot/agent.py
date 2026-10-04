@@ -48,7 +48,7 @@ If a bug report lacks a reproduction, ask for a minimal repro (StackBlitz or a r
 Never promise a fix or a release. If you are unsure, say what you checked and what is unclear.
 confidence = your honest probability the label is correct. 0.9 means you'd be wrong 1 time in 10."""
 
-def _num(lo, hi=float("inf")):
+def _num(lo, hi):
     return lambda v: type(v) in (int, float) and lo <= v <= hi
 
 
@@ -62,7 +62,7 @@ CONFIG = {
                   f"a table from {'/'.join(LABELS)} to your label names"),
     "label_prefix": ("bot:", lambda v: isinstance(v, str), "a string"),
     "docs": (["docs"], lambda v: isinstance(v, list) and all(isinstance(x, str) and x for x in v), "a list of directories"),
-    "per_issue_cap_usd": (CEILING, lambda v: _num(0)(v) and v > 0, "a number > 0"),
+    "per_issue_cap_usd": (CEILING, lambda v: type(v) in (int, float) and v > 0, "a number > 0"),
     "monthly_issue_cap": (0, lambda v: type(v) is int and v >= 0, "an integer >= 0 (0 = unlimited)"),
     "skip_new_accounts_days": (7, lambda v: type(v) is int and v >= 0, "an integer >= 0 (0 = off)"),
 }
@@ -108,7 +108,7 @@ def skip_reason(ev: dict, cfg: dict) -> str | None:
     if user.get("type") == "Bot" or user.get("login", "").endswith("[bot]"):
         return "author is a bot"
     if days and issue.get("author_association") in NEW_ASSOC:
-        made = datetime.fromisoformat(gh(f"/users/{issue['user']['login']}")["created_at"])
+        made = datetime.fromisoformat(gh(f"/users/{user['login']}")["created_at"])
         if now - made < timedelta(days=days):
             return f"author account is under {days} days old"
     if cap:
@@ -124,19 +124,30 @@ def skip_reason(ev: dict, cfg: dict) -> str | None:
     return None
 
 
-def no_mentions(text: str) -> str:
-    """Zero-width space after @ so a posted reply can't ping users or teams (issue text could ask for it)."""
-    return re.sub(r"@(?=[\w-])", "@\u200b", text)
+def no_mentions(text: str, repo: str = "") -> str:
+    """Defuse what injected issue text could make a posted reply do: ping (zero-width space after @), load images
+    (beacons), link off-repo (phishing/exfil URLs become inline code) or backlink other repos (owner/repo#N)."""
+    keep = lambda u: bool(repo) and u.startswith(f"https://github.com/{repo}/") and ".." not in u
+    code = lambda t, u: f"{t} (`{u}`)".lstrip()
+    text = re.sub(r"@(?=[\w-])", "@\u200b", text)
+    text = re.sub(r"!\[([^\]]*)\]\(([^)]*)\)", lambda m: code(m[1], m[2]), text)
+    text = re.sub(r"\[([^\]]*)\]\(([^)]*)\)", lambda m: m[0] if keep(m[2]) else code(m[1], m[2]), text)
+    text = re.sub(r"(?<![(`:\w/])(?:https?:)?//[^\s<>`)\"']+", lambda m: m[0] if keep(m[0]) else f"`{m[0]}`", text)
+    return re.sub(r"(\w)/([\w.-]+)#(\d)", "\\1/\\2#\u200b\\3", text)
 
 
 def marker(rec: dict) -> str:
     """Hidden prediction marker on posted comments, for the feedback loop. Values are validate()d, so no '-->'."""
-    return f"<!-- issuebot: {json.dumps({k: rec[k] for k in ('label', 'duplicate_of', 'confidence')})} -->"
+    return f"<!-- issuebot: {json.dumps({k: rec.get(k) for k in ('label', 'duplicate_of', 'confidence', 'applied')})} -->"
 
 
 def read_marker(body: str) -> dict | None:
     m = re.search(r"<!-- issuebot: (\{.*?\}) -->", body)
-    return json.loads(m.group(1)) if m else None
+    try:  # anyone can post a marker-shaped comment; feedback also checks the author is a bot
+        d = json.loads(m.group(1)) if m else None
+    except ValueError:
+        return None
+    return d if isinstance(d, dict) and "label" in d else None
 
 
 def _env(name: str, conv=str):
@@ -292,8 +303,8 @@ def main() -> None:
     ap.add_argument("--config", default=os.environ.get("ISSUEBOT_CONFIG"),
                     help="repo config TOML, relative to the repo checkout (default .github/issuebot.toml)")
     ap.add_argument("--mode", default=_env("ISSUEBOT_MODE"), choices=["shadow", "label", "comment"])
-    ap.add_argument("--model", default=os.environ.get("ISSUEBOT_MODEL", REPLY_MODEL))
-    ap.add_argument("--max-steps", type=int, default=int(os.environ.get("ISSUEBOT_MAX_STEPS", MAX_STEPS)))
+    ap.add_argument("--model", default=_env("ISSUEBOT_MODEL") or REPLY_MODEL)
+    ap.add_argument("--max-steps", type=int, default=_env("ISSUEBOT_MAX_STEPS", int) or MAX_STEPS)
     ap.add_argument("--routed", action="store_true",
                     default=_env("ISSUEBOT_ROUTED", lambda v: {"true": True, "false": False}.get(v.lower(), v)),
                     help="Haiku triage first, Sonnet only when needed (ignores --model/--max-steps)")
@@ -333,18 +344,20 @@ def main() -> None:
         return
     acted = []
     label = applied_label(rec["label"], cfg)
-    if mode in ("label", "comment") and rec["confidence"] >= min_conf and label:
+    labeled = mode in ("label", "comment") and rec["confidence"] >= min_conf and label
+    if labeled:
         gh(f"/repos/{repo}/issues/{n}/labels", "POST", json={"labels": [label]})
         acted.append(f"labeled {label}")
     if mode == "comment" and rec["reply"] and rec["confidence"] >= min_conf:
-        gh(f"/repos/{repo}/issues/{n}/comments", "POST", json={"body": no_mentions(rec["reply"]) + FOOTER + "\n" + marker(rec)})
+        body = no_mentions(rec["reply"], repo) + FOOTER + "\n" + marker({**rec, "applied": label if labeled else None})
+        gh(f"/repos/{repo}/issues/{n}/comments", "POST", json={"body": body})
         acted.append("commented")
     if path := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(path, "a") as f:
             f.write(f"## issuebot: #{n} ({mode})\n\n| label | duplicate_of | confidence | cost | route | steps |\n"
                     f"|---|---|---|---|---|---|\n| {rec['label']} | {rec['duplicate_of'] or '-'} | {rec['confidence']:.2f} | "
                     f"${rec['cost']:.4f} | {rec.get('route', a.model)} | {rec['steps']} |\n\nActions: {', '.join(acted) or 'none'}\n\n"
-                    f"### Draft reply\n\n{rec['reply']}\n")
+                    f"### Draft reply\n\n{no_mentions(rec['reply'], repo)}\n")
     print(json.dumps({k: rec[k] for k in ("label", "duplicate_of", "confidence", "cost", "error")}))
 
 

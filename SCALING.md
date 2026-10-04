@@ -45,7 +45,7 @@ The Batch API takes 50% off and stacks with cache discounts. A cache write costs
 - [x] Monthly cap counts issues *opened* this month (one search call) rather than `bot:*` labels, so shadow runs and verbatim `label_map` labels count too.
 - [x] New-account skip (author_association NONE / FIRST_TIME_CONTRIBUTOR / FIRST_TIMER, account < 7 days) runs before any model call.
 - [x] Action guards: non-`issues.opened` events, pull requests and bot authors skip for free. Issue text is delimited as untrusted data (`</issue>` escaped), comment replies have `@` mentions defused and carry a hidden `<!-- issuebot: {...} -->` prediction marker, and `ISSUEBOT_DRY_RUN=1` is smoke-tested via `uses: ./` in CI.
-- [x] Feedback loop: `issuebot.feedback` + weekly `feedback.yml` read `adopters.txt` repos' timelines (label kept 7 days, confirmed duplicate), append misses to `eval/candidates/` (path is `eval/`, not `evals/`), print DRIFT and open one `Drift: <repo>` issue. `--promote` merges at 20+ candidates. The window ends 7 days ago so labels can be judged.
+- [x] Feedback loop: `issuebot.feedback` + weekly `feedback.yml` read `adopters.txt` repos' timelines (label kept 7 days, confirmed duplicate), append misses to `eval/candidates/` (path is `eval/`, not `evals/`), print DRIFT and open one `Drift: <repo>` issue. **[deviation]** The label drift check flags a bot label missing from the repo's label set, not new repo labels the bot doesn't know. `--promote` merges at 20+ candidates. The window ends 7 days ago so labels can be judged.
 
 Nothing beyond Stage 4 is planned. Split web/worker, persistent clone volumes or a Postgres issue mirror get considered only if queue wait p95 stays above 2 min for 3 days or GitHub/Anthropic 429s hit more than 1% of jobs. Otherwise infra stays frozen and the time goes into evals and writeups.
 
@@ -79,7 +79,7 @@ Issue text is untrusted input from anyone on the internet. Design for that.
   - Tools are read-only.
   - Issue text is wrapped as data in the user turn, never in the system prompt.
   - Output must parse against the `{label, duplicate_of, reply, confidence}` schema, and `label` must be in the repo's label map.
-  - Default mode never posts text. Comment mode requires the per-repo unlock from Stage 2.
+  - Default mode never posts text. Comment mode requires the per-repo unlock from Stage 2. **[Stage 1 deviation]** Until that exists, the unlock is the repo admin setting `mode = "comment"` (config or action input); posted replies have mentions, images, off-repo links and cross-repo refs defused.
   - Adversarial issues live permanently in the eval set as regression cases.
 - **File exfiltration via `read_file` / `grep_repo`**:
   - Path allowlist from config. A hard denylist always applies: `.git/`, `.env*`, `*.pem`, `*.key`, `.github/workflows/` secrets context.

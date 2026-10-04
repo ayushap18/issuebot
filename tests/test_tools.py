@@ -87,6 +87,14 @@ class TestRepoTools(GitRepoTest):
         self.ctx["dir"] = tools.checkout(self.repo, self.commit("env", "2026-04-01T00:00:00Z"))
         self.assertEqual(tools.grep_repo(self.ctx, "SECRET"), "no matches")
 
+    def test_secrets_hidden_from_both_tools(self):
+        (self.repo / "id.pem").write_text("PRIVATE KEY\n")
+        self.ctx["dir"] = tools.checkout(self.repo, self.commit("pem", "2026-04-01T00:00:00Z"))
+        (self.ctx["dir"] / "gha-creds-1.json").write_text('{"private_key": "SECRET"}')  # untracked
+        self.assertEqual(tools.grep_repo(self.ctx, "PRIVATE"), "no matches")
+        for bad in ["id.pem", "gha-creds-1.json"]:
+            self.assertTrue(tools.call("read_file", {"path": bad, "start_line": 1, "end_line": 5}, self.ctx)[1], bad)
+
     def test_read_file_slice(self):
         self.assertEqual(tools.read_file(self.ctx, "docs/guide.md", 2, 3), "2: line 2\n3: line 3")
 

@@ -226,7 +226,7 @@ Optionally copy `examples/issuebot.toml` to `.github/issuebot.toml` (read with s
 
 | Key | Default | Notes |
 |---|---|---|
-| `mode` | `"shadow"` | `shadow` = summary only; `label` = apply a label; `comment` = label + post the draft reply |
+| `mode` | `"shadow"` | `shadow` = summary only; `label` = apply a label; `comment` = label + post the draft reply (mentions, images, off-repo links and cross-repo refs defused) |
 | `routed` | `false` | `true` = Haiku triage first; Sonnet drafts only when unsure or the label is bug/question |
 | `threshold` | `0.8` | routed mode confidence gate |
 | `min_confidence` | `0.8` | nothing is written below this |
@@ -251,7 +251,7 @@ The issue title and body are wrapped in an `<issue>` block in the user turn (a l
 
 ### Feedback loop
 
-`adopters.txt` lists repos running issuebot. `.github/workflows/feedback.yml` (weekly + manual) runs `python -m issuebot.feedback [--days 7]` from this repo; adopters send no telemetry. For issues created in the `--days` before the last 7 days (so every bot label has had 7 days) that carry a `bot:` label or the comment marker, it scores agreement: the label was kept 7 days (timeline `labeled`/`unlabeled`), or a maintainer confirmed the predicted `duplicate_of` (same rules as `gold()`). Misses with a maintainer reply are appended to `eval/candidates/<owner>__<repo>.jsonl` as dataset rows (`sha: null`, deduped by number). A repo whose agreement is more than 10pts under `eval/baseline.json` label accuracy, or whose bot label is gone from its label set, prints a `DRIFT` line; the workflow commits candidates and opens one `Drift: <repo>` issue (skipped while one is open). `python -m issuebot.feedback --promote [--min 20] [--force]` merges candidates into `eval/dataset.jsonl` (dedup by repo+number, SHA from a clone, new rows split by date among themselves so existing splits don't move) and clears them.
+`adopters.txt` lists repos running issuebot. `.github/workflows/feedback.yml` (weekly + manual) runs `python -m issuebot.feedback [--days 7]` from this repo; adopters send no telemetry. For issues created in the `--days` before the last 7 days (so every bot label has had 7 days) that carry a `bot:` label or a bot-authored comment marker, it scores agreement: the label was kept 7 days (timeline `labeled`/`unlabeled`; swapping `bot:bug` for the repo's own `bug` counts as kept), or a maintainer closed it as a duplicate (label only, same rules as `gold()`). Misses on closed issues with a maintainer reply are appended to `eval/candidates/<owner>__<repo>.jsonl` as dataset rows (`sha: null`, deduped by number). Only duplicates get an automatic gold label; other rows have `gold_label: null` and need a hand `label_override`, since `gold()` knows only vitest's label names. A repo whose agreement is more than 10pts under the offline baseline (`eval/baseline.json` cases with confidence >= the default `min_confidence`, i.e. the ones the live bot would label), or whose bot label is gone from its label set, prints a `DRIFT` line; the workflow commits candidates and opens one `Drift: <repo>` issue (skipped while one is open). `python -m issuebot.feedback --promote [--min 20] [--force]` merges labeled candidates into `eval/dataset.jsonl` once 20 new ones exist (dedup by repo+number, numbers already used by another repo are refused, SHA from a clone, new rows split by date among themselves so existing splits don't move) and clears them. Adding dev rows reshuffles the gate's `--stratify` slice, so re-record `eval/baseline.json` after a promote.
 
 ## Project layout
 

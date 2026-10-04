@@ -169,8 +169,19 @@ class ValidateTest(unittest.TestCase):
 
     def test_marker_round_trip(self):
         rec = {"label": "duplicate", "duplicate_of": 7, "confidence": 0.85, "reply": "x"}
-        self.assertEqual(agent.read_marker("hi\n" + agent.marker(rec)), {k: rec[k] for k in ("label", "duplicate_of", "confidence")})
-        self.assertIsNone(agent.read_marker("no marker"))
+        self.assertEqual(agent.read_marker("hi\n" + agent.marker(rec)),
+                         {"label": "duplicate", "duplicate_of": 7, "confidence": 0.85, "applied": None})
+        for bad in ["no marker", "<!-- issuebot: {x} -->", '<!-- issuebot: {"a": 1} -->']:
+            self.assertIsNone(agent.read_marker(bad), bad)
+
+    def test_no_mentions_defuses_links_images_and_refs(self):
+        out = agent.no_mentions("[fix](https://evil.example/x) ![i](https://evil.example/?k=1) org/repo#1 "
+                                "https://evil.example/y [ok](https://github.com/o/r/issues/3)", "o/r")
+        self.assertNotIn("](https://evil", out)
+        self.assertNotIn("![", out)
+        self.assertNotIn(" https://evil", out)
+        self.assertIn("org/repo#\u200b1", out)
+        self.assertIn("[ok](https://github.com/o/r/issues/3)", out)
 
     def test_render_truncates_body(self):
         r = agent.render({**ISSUE, "body": "x" * 20000}, "o/r")
@@ -220,7 +231,7 @@ class ActionModeTest(unittest.TestCase):
         gh, _ = self.main("comment")
         body = gh.call_args.kwargs["json"]["body"]
         self.assertTrue(body.startswith("Need a repro.") and "issuebot" in body)
-        self.assertEqual(agent.read_marker(body), {"label": "bug", "duplicate_of": None, "confidence": 0.9})
+        self.assertEqual(agent.read_marker(body), {"label": "bug", "duplicate_of": None, "confidence": 0.9, "applied": "bot:bug"})
 
     def test_comment_strips_mentions(self):
         self.REC = {**self.REC, "reply": "cc @octocat and @org/team, see a@b.c"}
@@ -259,6 +270,11 @@ class ActionModeTest(unittest.TestCase):
         gh.assert_not_called()
         gh, _ = self.main("shadow", toml=toml)  # so does a CLI flag
         gh.assert_not_called()
+
+    def test_blank_model_and_max_steps_inputs_use_defaults(self):
+        self.main("shadow", env={"ISSUEBOT_MODEL": "", "ISSUEBOT_MAX_STEPS": ""})
+        self.assertEqual((self.run_mock.call_args.args[2], self.run_mock.call_args.kwargs["max_steps"]),
+                         (agent.REPLY_MODEL, agent.MAX_STEPS))
 
     def test_explicit_config_path_must_exist(self):
         with self.assertRaises(FileNotFoundError):
