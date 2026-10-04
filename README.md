@@ -138,6 +138,8 @@ python -m issuebot.run_eval --compare results/A.json results/B.json
 
 Other flags: `--name NAME`, `--no-judge`, `--dataset PATH`, `--split dev|test|all`.
 
+Replay cache: `ISSUEBOT_REPLAY=record` stores every model call (agent and judge) under `cache/replay/` (override with `ISSUEBOT_REPLAY_DIR`), keyed on the sha256 of the full request. `ISSUEBOT_REPLAY=replay` serves only from the cache and fails on a miss, so unchanged cases cost $0 and need no API key.
+
 Triage a single live issue (prints the JSON result, posts nothing):
 
 ```bash

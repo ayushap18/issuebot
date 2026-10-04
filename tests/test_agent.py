@@ -154,5 +154,45 @@ class ActionModeTest(unittest.TestCase):
         self.assertTrue(body.startswith("Need a repro.") and "issuebot" in body)
 
 
+class ReplayTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ctx = {"repo": "o/r", "dir": Path(self.tmp.name), "number": 42, "created_at": ISSUE["created_at"]}
+        self.call = mock.patch.object(agent, "call", side_effect=lambda n, a, c: (f"out:{n}", False))
+        self.call.start()
+
+    def tearDown(self):
+        self.call.stop()
+        self.tmp.cleanup()
+
+    def replay(self, mode, inner=None):
+        return agent.Replay(mode, str(Path(self.tmp.name) / "cache"), inner)
+
+    def test_record_then_hit_and_key_ignores_dict_order(self):
+        fake = FakeClient(msg(text("hi"), stop="end_turn"))
+        rec = self.replay("record", fake)
+        a = rec.messages.create(model="m", max_tokens=5, messages=[{"role": "user", "content": "x"}])
+        b = rec.messages.create(messages=[{"content": "x", "role": "user"}], max_tokens=5, model="m")
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual((a.content[0].text, b.stop_reason, b.usage.input_tokens), ("hi", "end_turn", 100))
+        rec.messages.create(model="m", max_tokens=6, messages=[{"role": "user", "content": "x"}])
+        self.assertEqual(len(fake.calls), 2)  # any param change is a miss
+
+    def test_replay_miss_raises(self):
+        with self.assertRaisesRegex(LookupError, "ISSUEBOT_REPLAY=record"):
+            self.replay("replay").messages.create(model="m", messages=[])
+        with self.assertRaises(ValueError):
+            agent.Replay("bogus")
+
+    def test_agent_runs_on_replayed_responses(self):
+        fake = FakeClient(msg(tool("search_issues", {"query": "crash"})), msg(submit("bug", conf=0.9)))
+        first = agent.run(ISSUE, self.ctx, client=self.replay("record", fake), runs_dir=self.tmp.name)
+        again = agent.run(ISSUE, self.ctx, client=self.replay("replay"), runs_dir=self.tmp.name)
+        self.assertEqual(len(fake.calls), 2)
+        for k in ("label", "confidence", "reply", "steps", "usage"):
+            self.assertEqual(first[k], again[k])
+        self.assertEqual((again["label"], again["tool_calls"][0]["name"]), ("bug", "search_issues"))
+
+
 if __name__ == "__main__":
     unittest.main()

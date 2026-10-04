@@ -1,5 +1,6 @@
 """Model constants, the triage agent loop, tracing, and the CLI / GitHub Action entrypoint."""
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -44,6 +45,39 @@ confidence = your honest probability the label is correct. 0.9 means you'd be wr
 FOOTER = "\n\n---\n_Automated triage draft (issuebot). A maintainer will follow up._"
 
 
+def _plain(o):
+    # SDK models and fakes (SimpleNamespace) -> JSON; exclude_unset keeps replayed objects hashing the same
+    return o.model_dump(mode="json", exclude_unset=True) if hasattr(o, "model_dump") else vars(o)
+
+
+class Replay:
+    """Record/replay cache with the SDK's client.messages.create shape. Key = sha256 of the canonical request."""
+
+    def __init__(self, mode: str, dir: str | None = None, inner=None):
+        if mode not in ("record", "replay"):
+            raise ValueError(f"ISSUEBOT_REPLAY must be off, record or replay, got {mode!r}")
+        self.mode, self.inner, self.messages = mode, inner, self
+        self.dir = Path(dir or os.environ.get("ISSUEBOT_REPLAY_DIR", "cache/replay"))
+
+    def create(self, **kw):
+        key = hashlib.sha256(json.dumps(kw, sort_keys=True, default=_plain, separators=(",", ":")).encode()).hexdigest()
+        f = self.dir / f"{key}.json"
+        if not f.exists():
+            if self.mode == "replay":
+                raise LookupError(f"replay miss for {kw.get('model')} request {key[:12]} (no {f}); "
+                                  "rerun with ISSUEBOT_REPLAY=record to fill the cache")
+            self.inner = self.inner or anthropic.Anthropic()  # lazy: replay hits need no API key
+            r = self.inner.messages.create(**kw)
+            self.dir.mkdir(parents=True, exist_ok=True)
+            f.write_text(json.dumps(r, default=_plain))
+        return anthropic.types.Message.construct(**json.loads(f.read_text()))  # same objects on hit and miss
+
+
+def make_client():
+    mode = os.environ.get("ISSUEBOT_REPLAY", "off")
+    return anthropic.Anthropic() if mode == "off" else Replay(mode)
+
+
 def render(issue: dict, repo: str) -> str:
     return (f"Repository: {repo}\n<issue number={issue['number']} created_at={issue['created_at']}>\n"
             f"Title: {issue['title']}\n\n{(issue.get('body') or '')[:BODY_CHARS]}\n</issue>")
@@ -76,7 +110,7 @@ def trace(record: dict, dir: str = "runs") -> None:
 
 def run(issue: dict, ctx: dict, model: str = REPLY_MODEL, tools: list | None = None,
         max_steps: int = MAX_STEPS, client=None, runs_dir: str = "runs") -> dict:
-    client = client or anthropic.Anthropic()
+    client = client or make_client()
     max_steps = max(1, max_steps)
     tools = TOOLS + [SUBMIT] if tools is None else tools  # baseline passes [SUBMIT]
     prompt = render(issue, ctx["repo"])

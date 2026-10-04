@@ -9,8 +9,6 @@ import subprocess
 from datetime import date
 from pathlib import Path
 
-import anthropic
-
 from issuebot import agent
 from issuebot.judge import JUDGE_MODEL, judge
 from issuebot.tools import LABELS, SUBMIT, checkout, clone
@@ -161,7 +159,7 @@ def main() -> None:
     rows = load(a.dataset, a.split, a.limit)
     short = a.model.removeprefix("claude-").split("-2025")[0]
     name = a.name or f"{a.mode}-{short}-{a.split}-{date.today()}"
-    client = anthropic.Anthropic()
+    client = agent.make_client()
     srcs = {r: clone(r) for r in {row["repo"] for row in rows}}  # fetch once, not per case
     cases = []
     for row in rows:
