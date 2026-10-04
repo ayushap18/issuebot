@@ -26,8 +26,9 @@ Target repo for v1: [`vitest-dev/vitest`](https://github.com/vitest-dev/vitest).
    | grep_repo      git grep over tracked files at the issue SHA |
    | read_file      numbered line range, path-guarded            |
    | list_docs      markdown files under docs/                   |
-   | search_issues  GitHub search, created:<issue.created_at,    |
-   |                own number dropped, no state/labels/comments |
+   | search_issues  GitHub search (or cached FTS5/local index),  |
+   |                created:<issue.created_at, own number        |
+   |                dropped, no state/labels/comments            |
    +------------------------------------------------------------+
                                   |
                                   v
@@ -87,6 +88,7 @@ Known remaining leakage: earlier issues' bodies may have been edited after the f
 | `label_accuracy` | predicted label == gold. Printed next to `majority_floor` (share of the most common class) |
 | `macro_f1` | mean F1 over the 4 labels, so a bot that always says "bug" can't look good |
 | `dup_precision` / `dup_recall` | a duplicate counts only if `duplicate_of` matches the gold issue number |
+| `dup_recall_at5` | retrieval only: share of gold duplicates whose original was in the top 5 of any `search_issues` call the agent made (from `hits` in each case's `tool_calls`; results files from before `hits` was recorded score 0) |
 | `judge_mean`, `judge_ge4` | LLM-as-judge score 1-5 vs the maintainer's actual reply, and the share scoring 4+ |
 | `wrong_rate`, `confidently_wrong` | judge flags a factual contradiction or a fix that would not work; `confidently_wrong` = wrong AND confidence >= 0.7 |
 | `acc_at_0.8`, `coverage_at_0.8` | accuracy and share of cases at confidence >= 0.8 (picks the Action threshold) |
@@ -251,12 +253,36 @@ issuebot runs on `issues.opened` as a composite GitHub Action with your own Anth
 See how issuebot would have done on your own repo before it touches a live issue:
 
 ```bash
-python -m issuebot.backtest owner/repo [--n 100] [--mode agent|routed] [--out results/backtest-owner__repo.json]
+python -m issuebot.backtest owner/repo [--n 100] [--mode agent|routed] [--search fts|local|github] [--out results/backtest-owner__repo.json]
 ```
 
 It takes the last `--n` closed issues that got a maintainer reply (same filters and gold labels as `build_eval`), runs each with the repo checked out at the commit before the issue was opened and with search limited to earlier issues, judges every reply against the maintainer's, and writes the results file plus a markdown scorecard (label accuracy, duplicates found X/Y, judge mean, $ total and $/issue, p50/p95 latency, the 10 worst replies with links) to stdout and the job summary.
 
-The repo's issue list is fetched once through the REST list endpoint and cached at `cache/corpus-<owner>__<repo>.json` (reruns fetch only issues updated since). `search_issues` is answered from that corpus (every query term must match title or body; created before the issue, never the issue itself) and only a local miss calls the GitHub search API. Every search API call in issuebot is spaced to at most 25/min and honors `retry-after` / `x-ratelimit-reset`.
+The repo's issue list is fetched once through the REST list endpoint and cached at `cache/corpus-<owner>__<repo>.json` (reruns fetch only issues updated since). By default (`--search fts`) `search_issues` is answered from an SQLite FTS5 index of that corpus and never calls the search API; `--search local` and `--search github` select the other backends (see [Issue search backends](#issue-search-backends-stage-3)). Every search API call in issuebot is spaced to at most 25/min and honors `retry-after` / `x-ratelimit-reset`.
+
+### Issue search backends (Stage 3)
+
+`search_issues` has three backends, chosen per run with `--search` (`run_eval` default `github`, `backtest` default `fts`) and recorded as `search` in the results file so A/B runs can be told apart:
+
+| `--search` | How | API calls |
+|---|---|---|
+| `github` | GitHub search API, `in:title,body created:<created_at` | one per query, <= 25/min |
+| `local` | every query term must appear in title or body of the cached corpus, newest first | only on a local miss |
+| `fts` | SQLite FTS5 index (`porter unicode61`) of the cached corpus, terms ORed, ranked by bm25 | none |
+
+The FTS index is `cache/fts-<owner>__<repo>.sqlite`, built by `tools.index(repo, corpus)` from the cached corpus and updated incrementally (only new or edited issues are rewritten; rowid = issue number). It sits next to the corpus in `cache/`, so the backtest workflow's `actions/cache` keeps both. The query is untrusted (the model writes it): qualifiers, `AND`/`OR`/`NOT` and `-exclusions` are dropped, every remaining word token is double-quoted so it is always a plain string to FTS5 (no `NEAR`, `*`, column filters or syntax errors), and the SQL is parameterized. Leakage guards are the same as the other backends: `created_at < case created_at AND number != case number` in SQL, then the same local recheck, and the same `_hit` fields. If the local sqlite3 lacks FTS5, `fts` prints one warning and runs as `local` (and the results file says `local`).
+
+`local` and `fts` need the corpus, so `run_eval --search local|fts` fetches it once per repo in the dataset (REST list pages, ~1 request per 100 issues the first time). The live Action stays on `github`: the config key `search` only accepts `"github"` until an A/B shows FTS wins.
+
+A/B on the same slice (FTS is a flag, off by default; turn it on only if the eval says so):
+
+```bash
+python -m issuebot.run_eval --split dev --limit 40 --stratify --search github --name ab-github
+python -m issuebot.run_eval --split dev --limit 40 --stratify --search fts    --name ab-fts
+python -m issuebot.run_eval --compare results/ab-github.json results/ab-fts.json   # paired bootstrap, incl. dup_recall_at5
+```
+
+For one repo's backtest: `python -m issuebot.backtest owner/repo --search github --out results/bt-github.json`, the same with `--search fts --out results/bt-fts.json`, then `--compare` the two files. Both runs judge every reply, so the A/B costs about two eval runs.
 
 To run it in Actions on your key, copy [`examples/issuebot-backtest.yml`](examples/issuebot-backtest.yml) to `.github/workflows/` and run it from the Actions tab (input `n`: 25, 50, 100 or 200; the CLI caps `--n` at 500). It installs issuebot from a pinned tag and needs `v1.1.0` or later (the first release with the backtest); pin a full commit SHA for reproducible runs. It needs only `contents: read` + `issues: read`, caches `cache/` with `actions/cache`, and uploads the results JSON as an artifact. Expect roughly $5-9 per 100 issues. Public repos only (the clone is anonymous).
 
@@ -291,6 +317,7 @@ Read with stdlib `tomllib`. Every key is optional and validated strictly by `CON
 | `per_issue_cap_usd` | `0.15` | a number > 0 | past this $ the loop gets one submit-only step, then stops (`capped: true`) |
 | `monthly_issue_cap` | `0` | an integer >= 0 (0 = unlimited) | skip once more than this many issues were opened this month (one search call). Counts all issues opened, not only triaged ones |
 | `skip_new_accounts_days` | `7` | an integer >= 0 (0 = off) | skip authors with `author_association` NONE / FIRST_TIME_CONTRIBUTOR / FIRST_TIMER whose account is younger than this (one `GET /users/{login}`) |
+| `search` | `"github"` | "github" (local and fts need a cached corpus: use --search in run_eval / backtest) | the `search_issues` backend. The Action has no cached corpus, so only the GitHub search API is allowed here for now; see [Issue search backends](#issue-search-backends-stage-3) |
 
 ### Guards and output
 
@@ -388,6 +415,10 @@ SCALING.md        what changes when this runs on many repos
 - [x] Per-repo unlock/demote in `eval/status.json`, enforced by the Action (fail closed to label)
 - [x] Static dashboard on GitHub Pages, worst repo first; `branding:` in `action.yml`
 - [ ] Publish backtest scorecards for 3-5 popular public repos; list on the Marketplace; 10-case CI slice per opted-in repo
+
+**Stage 3: retrieval (step 1 built as a flag, see SCALING.md)**
+- [x] SQLite FTS5 issue index (`tools.index`), `--search github|local|fts`, `dup_recall_at5` metric
+- [ ] Run the github-vs-fts A/B; enable per repo only if it wins. Embeddings (step 2) only if FTS still misses
 
 **Week 1: dataset + baseline**
 - [ ] Pull 300 rows into `eval/dataset.jsonl` and commit it

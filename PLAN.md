@@ -563,4 +563,8 @@ packages = ["issuebot"]
 - [x] `issuebot/dashboard.py` + `pages.yml`: static GitHub Pages dashboard, worst repo first; Marketplace `branding:` in `action.yml`
 - [ ] Run backtests on 3-5 public repos and commit their results; publish to the Marketplace
 
-Skipped in v1: vector search, Batch API and parallel eval workers. SCALING.md lists the trigger for each.
+**Built ahead of the roadmap (SCALING.md Stage 3, step 1)**
+- [x] SQLite FTS5 issue index (`tools.index`, bm25, sanitized MATCH, same leakage cutoff) behind `--search github|local|fts`; `search` recorded in results; `dup_recall_at5` metric
+- [ ] github-vs-fts A/B with `--compare`; config `search` stays `"github"` in the Action until it wins
+
+Skipped in v1: vector search (embeddings, Stage 3 step 2), Batch API and parallel eval workers. SCALING.md lists the trigger for each.
