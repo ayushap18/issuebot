@@ -14,7 +14,7 @@ from datetime import date
 from pathlib import Path
 
 from issuebot import agent
-from issuebot.judge import JUDGE_MODEL, judge
+from issuebot.judge import CAUSES, JUDGE_MODEL, judge, tag_failure
 from issuebot.tools import LABELS, SUBMIT, checkout, clone
 
 
@@ -47,7 +47,8 @@ def run_case(row: dict, src: Path, mode: str, model: str, client, do_judge: bool
             rec = agent.run(issue, ctx, model, client=client)
         case.update(pred=rec["label"], pred_dup=rec["duplicate_of"], confidence=rec["confidence"], cost=rec["cost"],
                     latency_s=rec["latency_s"], steps=rec["steps"], error=rec["error"], reply=rec["reply"],
-                    route=rec.get("route"), capped=rec.get("capped"))
+                    route=rec.get("route"), capped=rec.get("capped"),
+                    tool_calls=[{"name": t["name"], "input": t["input"]} for t in rec.get("tool_calls", [])])
         if do_judge and rec["reply"]:
             j = judge(issue, row["maintainer_reply"], rec["reply"], client=client)
             case.update(score=j["score"], wrong=j["wrong"], judge_cost=j["cost"], judge_reason=j["reason"])
@@ -233,6 +234,35 @@ def calibrate(grading: str, results: str) -> bool:
     return k >= 0.6
 
 
+def failed(c: dict) -> bool:
+    return (c["pred"] != c["gold"] or (c["gold"] == "duplicate" and not dup_hit(c))
+            or (c["score"] is not None and c["score"] <= 2) or bool(c["wrong"]))
+
+
+def tag_failures(results: str, dataset: str, client=None) -> bool:
+    """Tag each failed case's primary cause in place; True = Stage 3 trigger (retrieval_miss >= 30%)."""
+    res = json.loads(Path(results).read_text())
+    rows = {r["number"]: r for r in load(dataset)}
+    client = client or agent.make_client()
+    fails = [c for c in res["cases"] if failed(c)]
+    for c in fails:
+        r = rows[c["number"]]
+        try:
+            t = tag_failure(r, r["maintainer_reply"], c, client=client)
+            c.update(failure_tag=t["cause"], failure_reason=t["reason"])
+        except Exception as e:  # untagged counts as other, so shares still sum over all failures
+            c.update(failure_tag="other", failure_reason=f"tag error: {type(e).__name__}: {e}")
+    counts = {k: sum(c["failure_tag"] == k for c in fails) for k in CAUSES}
+    res["failure_tags"] = counts
+    Path(results).write_text(json.dumps(res, indent=1))
+    print(f"{len(fails)} failures of {len(res['cases'])} cases")
+    for k, v in counts.items():
+        print(f"{k:16} {v:4}  {_div(v, len(fails)):.1%}")
+    met = bool(fails) and counts["retrieval_miss"] / len(fails) >= 0.3
+    print("STAGE 3 TRIGGER MET" if met else "stage 3 trigger not met (retrieval_miss < 30%)")
+    return met
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", default="agent", choices=["agent", "baseline", "routed"])
@@ -250,7 +280,11 @@ def main() -> None:
     ap.add_argument("--export-grading", metavar="RESULTS", help="write a blind hand-grading CSV to stdout")
     ap.add_argument("--n", type=int, default=50, help="--export-grading sample size")
     ap.add_argument("--calibrate", nargs=2, metavar=("CSV", "RESULTS"), help="judge vs hand grades; exit 1 if kappa < 0.6")
+    ap.add_argument("--tag-failures", metavar="RESULTS", help="tag each failure's cause in place (Stage 3 trigger)")
     a = ap.parse_args()
+    if a.tag_failures:
+        tag_failures(a.tag_failures, a.dataset)
+        return
     if a.export_grading:
         return export_grading(a.export_grading, a.dataset, a.n)
     if a.calibrate:

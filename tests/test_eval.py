@@ -252,6 +252,45 @@ class JudgeTest(unittest.TestCase):
                 judge.judge(self.ISSUE, "m", "r", client=FakeClient(msg(text(bad))))
 
 
+class TagFailuresTest(unittest.TestCase):
+    def run_tag(self, causes):
+        rows = [{"number": i, "split": "dev", "title": f"t{i}", "body": "b", "maintainer_reply": "m"} for i in range(6)]
+        cases = [case(0, "bug", "bug", 0.9, 5, False, 0.0),  # pass
+                 case(1, "bug", "question", 0.9, 5, False, 0.0),  # wrong label
+                 {**case(2, "duplicate", "duplicate", 0.9, 5, False, 0.0), "gold_dup": 7, "pred_dup": 8},  # missed dup
+                 case(3, "bug", "bug", 0.9, 2, False, 0.0),  # judge <= 2
+                 case(4, "bug", "bug", 0.9, 4, True, 0.0),  # wrong
+                 {**case(5, "duplicate", "duplicate", 0.9, 4, False, 0.0), "gold_dup": 7, "pred_dup": 7}]  # pass
+        cases[1]["tool_calls"] = [{"name": "grep_repo", "input": {"pattern": "pool"}}]
+        fc = FakeClient(*(msg(text(json.dumps({"reason": "r", "cause": k})), stop="end_turn") for k in causes))
+        with tempfile.TemporaryDirectory() as d:
+            ds, res = Path(d) / "ds.jsonl", Path(d) / "r.json"
+            ds.write_text("\n".join(map(json.dumps, rows)))
+            res.write_text(json.dumps({"cases": cases}))
+            with mock.patch("builtins.print") as pr:
+                met = run_eval.tag_failures(str(res), str(ds), client=fc)
+            out = json.loads(res.read_text())
+        return met, out, fc, "\n".join(c.args[0] for c in pr.call_args_list)
+
+    def test_only_failures_tagged_and_trigger(self):
+        met, out, fc, printed = self.run_tag(["retrieval_miss", "retrieval_miss", "reasoning", "taxonomy"])
+        self.assertTrue(met)
+        self.assertEqual(len(fc.calls), 4)
+        self.assertIn("grep_repo", fc.calls[0]["messages"][0]["content"])
+        self.assertEqual(fc.calls[0]["output_config"]["format"]["schema"], judge.TAG_SCHEMA)
+        self.assertEqual([c.get("failure_tag") for c in out["cases"]],
+                         [None, "retrieval_miss", "retrieval_miss", "reasoning", "taxonomy", None])
+        self.assertEqual(out["failure_tags"], {"retrieval_miss": 2, "reasoning": 1, "taxonomy": 1,
+                                               "missing_context": 0, "other": 0})
+        self.assertIn("50.0%", printed)
+        self.assertIn("STAGE 3 TRIGGER MET", printed)
+
+    def test_trigger_not_met(self):
+        met, out, _, printed = self.run_tag(["retrieval_miss", "reasoning", "reasoning", "taxonomy"])
+        self.assertFalse(met)  # 25% < 30%
+        self.assertNotIn("STAGE 3 TRIGGER MET", printed)
+
+
 class RunCaseTest(unittest.TestCase):
     ROW = {"repo": "o/r", "number": 9, "title": "t", "body": "b", "created_at": "2026-01-01T00:00:00Z",
            "sha": "abc", "gold_label": "bug", "label_override": "question", "gold_duplicate_of": None,
