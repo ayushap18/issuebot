@@ -117,6 +117,27 @@ ISSUEBOT_REPLAY=record ISSUEBOT_REPLAY_DIR=eval/replay \
 cp results/baseline.json eval/baseline.json
 ```
 
+### Run evals on a subscription CLI
+
+No `ANTHROPIC_API_KEY` needed: `ISSUEBOT_BACKEND=claude-cli` runs every model call through `claude -p` on your Claude subscription (one fresh run per call, empty temp dir, no tools/MCP/settings, `ANTHROPIC_API_KEY` stripped from its env so it can't bill the key). Tool use is emulated: the transcript and tool schemas go in, a JSON-schema'd `tool_calls` list comes back as `tool_use` blocks, so `agent.run` is unchanged.
+
+```bash
+export GITHUB_TOKEN=$(gh auth token)
+# one issue
+ISSUEBOT_BACKEND=claude-cli python -m issuebot.agent --repo vitest-dev/vitest --issue 1234
+# eval, judged by claude-cli, with a cross-model second judge
+ISSUEBOT_BACKEND=claude-cli python -m issuebot.run_eval --split dev --limit 20 --stratify --judge2 agy
+# judge on a different backend than the agent
+ISSUEBOT_BACKEND=claude-cli ISSUEBOT_JUDGE_BACKEND=agy python -m issuebot.run_eval --split dev --limit 20
+# backtest
+ISSUEBOT_BACKEND=claude-cli python -m issuebot.backtest vitest-dev/vitest --n 20
+```
+
+- Every trace, case and results file records its `backend` (`judge_backend`, `judge2_backend` at the top level). CLI `$` figures are the CLI's list-price-equivalent (`total_cost_usd`), not what you're billed; agy/codex report no price, so their `$` is 0. Don't compare CLI cost columns against API runs as spend.
+- `--judge2 agy|codex|claude-cli` scores each reply with a second judge (`judge2_score`, `judge2_wrong`, `judge2_reason`) and adds `metrics.judge_agreement` (exact, within-1, weighted kappa, wrong kappa).
+- **agy and codex are judge-only** (`ISSUEBOT_JUDGE_BACKEND` / `--judge2`). Neither can turn off its own tools (agy browses and searches, codex runs shell commands), so as the agent it could look up how the real issue was resolved: leakage. `ISSUEBOT_BACKEND=agy|codex` and passing tools to them raise an error. As judges they already see the maintainer reply, so there's nothing to leak.
+- Knobs: `ISSUEBOT_CLI_TIMEOUT` (s, default 300), `ISSUEBOT_AGY_MODEL` (default `gemini-3.8-flash-medium`, list with `agy models`), `ISSUEBOT_CODEX_MODEL` (default: codex's own config). Replay caching works as usual; the backend is part of the cache key.
+
 ## Results
 
 No numbers yet. Every row below is a placeholder until it is produced by the harness and committed to `results/`.
@@ -326,6 +347,7 @@ issuebot/
   build_eval.py   closed issues -> eval/dataset.jsonl (gold labels, SHA at issue time)
   run_eval.py     run agent/baseline/routed, score, write results/<name>.json, --compare, --gate,
                   --export-grading / --calibrate, --tag-failures
+  cli.py          subscription-CLI backend (claude -p agent + judge; agy / codex judge only)
   judge.py        LLM-as-judge vs the maintainer's reply, failure-cause tagger
   feedback.py     weekly adopter feedback: agreement, miss candidates, drift, per-repo status, --promote
   backtest.py     backtest one repo's last N closed issues, cached corpus, scorecard

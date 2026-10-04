@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from issuebot import agent, build_eval, run_eval
-from issuebot.judge import JUDGE_MODEL
+from issuebot.judge import JUDGE_MODEL, judge_backend
 from issuebot.tools import clone, pages
 
 KEYS = ("number", "title", "body", "created_at", "html_url", "state", "state_reason", "author_association")
@@ -71,13 +71,14 @@ def main(argv: list[str] | None = None) -> None:
     issues = corpus(a.repo)
     closed = sorted((i for i in issues if i["state"] == "closed"), key=lambda i: i["created_at"], reverse=True)
     rows = build_eval.build(a.repo, a.n, issues=closed)
-    client, src, cases = agent.make_client(), clone(a.repo), []
+    client, jclient, src, cases = agent.make_client(), agent.make_client(judge_backend()), clone(a.repo), []
     for row in rows:  # checkout at the issue's SHA, search only issues created before it (run_case + tools enforce both)
-        c = run_eval.run_case(row, src, a.mode, agent.REPLY_MODEL, client, corpus=issues)
+        c = run_eval.run_case(row, src, a.mode, agent.REPLY_MODEL, client, corpus=issues, judge_client=jclient)
         cases.append({**c, "url": row["url"], "title": row["title"]})
         print(f"#{c['number']} {c['gold']}->{c['pred']} score={c['score'] or '-'} ${c['cost'] + c['judge_cost']:.3f}",
               flush=True)
     res = {"name": out.stem, "repo": a.repo, "mode": a.mode, "model": agent.REPLY_MODEL, "judge_model": JUDGE_MODEL,
+           "judge_backend": judge_backend(),
            "n": len(cases), "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
            "metrics": run_eval.metrics(cases), "cases": cases}
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -13,6 +13,7 @@ import anthropic
 import httpx
 
 from issuebot import tools
+from issuebot.cli import CLIClient
 from issuebot.tools import LABELS, SUBMIT, TOOLS, call, checkout, clone, gh, sha_at
 
 TRIAGE_MODEL = "claude-haiku-4-5"   # judge, label-only Action mode, cheap runs
@@ -206,14 +207,15 @@ def _plain(o):
 class Replay:
     """Record/replay cache with the SDK's client.messages.create shape. Key = sha256 of the canonical request."""
 
-    def __init__(self, mode: str, dir: str | None = None, inner=None):
+    def __init__(self, mode: str, dir: str | None = None, inner=None, backend: str = "api"):
         if mode not in ("record", "replay"):
             raise ValueError(f"ISSUEBOT_REPLAY must be off, record or replay, got {mode!r}")
-        self.mode, self.inner, self.messages = mode, inner, self
+        self.mode, self.inner, self.messages, self.backend = mode, inner, self, backend
         self.dir = Path(dir or os.environ.get("ISSUEBOT_REPLAY_DIR", "cache/replay"))
 
     def create(self, **kw):
-        key = hashlib.sha256(json.dumps(kw, sort_keys=True, default=_plain, separators=(",", ":")).encode()).hexdigest()
+        k = kw if self.backend == "api" else {**kw, "_backend": self.backend}  # api keys unchanged: old caches still hit
+        key = hashlib.sha256(json.dumps(k, sort_keys=True, default=_plain, separators=(",", ":")).encode()).hexdigest()
         f = self.dir / f"{key}.json"
         if not f.exists():
             if self.mode == "replay":
@@ -226,9 +228,16 @@ class Replay:
         return anthropic.types.Message.construct(**json.loads(f.read_text()))  # same objects on hit and miss
 
 
-def make_client():
+def make_client(backend: str | None = None):
+    """backend: api | claude-cli (agent) or agy | codex (judge only, passed explicitly). Default ISSUEBOT_BACKEND."""
+    if backend is None:
+        backend = os.environ.get("ISSUEBOT_BACKEND") or "api"
+        if backend not in ("api", "claude-cli"):
+            raise ValueError(f"ISSUEBOT_BACKEND must be api or claude-cli, got {backend!r} "
+                             "(agy/codex can browse or run commands, so they're only allowed as ISSUEBOT_JUDGE_BACKEND)")
+    inner = None if backend == "api" else CLIClient(backend)
     mode = os.environ.get("ISSUEBOT_REPLAY", "off")
-    return anthropic.Anthropic() if mode == "off" else Replay(mode)
+    return (inner or anthropic.Anthropic()) if mode == "off" else Replay(mode, inner=inner, backend=backend)
 
 
 def render(issue: dict, repo: str) -> str:
@@ -253,7 +262,10 @@ def validate(inp: dict) -> dict:
     return {"label": label, "duplicate_of": dup, "reply": str(inp.get("reply") or ""), "confidence": conf}
 
 
-def cost(model: str, usage: dict) -> float:
+def cost(model: str, usage: dict, reported: float | None = None) -> float:
+    """reported = the CLI backend's own list-price figure; preferred when present."""
+    if reported is not None:
+        return reported
     p = PRICES.get(model, PRICES[REPLY_MODEL])
     return (usage["input"] * p[0] + usage["output"] * p[1] + usage["cache_read"] * p[2] + usage["cache_write"] * p[3]) / 1e6
 
@@ -272,15 +284,17 @@ def run(issue: dict, ctx: dict, model: str = REPLY_MODEL, tools: list | None = N
     prompt = render(issue, ctx["repo"])
     msgs = [{"role": "user", "content": prompt}]
     usage = dict(input=0, output=0, cache_read=0, cache_write=0)
-    calls, out, stop, capped, t0 = [], None, None, False, time.monotonic()
+    calls, out, stop, capped, t0, cli_cost = [], None, None, False, time.monotonic(), None
     for step in range(max_steps):
-        capped = cost(model, usage) >= ceiling
+        capped = cost(model, usage, cli_cost) >= ceiling
         last = step == max_steps - 1 or capped
         # Sonnet 5.5 400s on forced tool_choice, so narrow the tool list on the last step instead.
         r = client.messages.create(model=model, max_tokens=MAX_TOKENS, system=SYSTEM,
                                    tools=[SUBMIT] if last else tools, messages=msgs,
                                    cache_control={"type": "ephemeral"}, **EXTRA.get(model, {}))
         u, stop = r.usage, r.stop_reason
+        if (c := getattr(r, "_cost", None)) is not None:
+            cli_cost = (cli_cost or 0) + c
         usage["input"] += u.input_tokens or 0
         usage["output"] += u.output_tokens or 0
         usage["cache_read"] += getattr(u, "cache_read_input_tokens", 0) or 0
@@ -307,8 +321,8 @@ def run(issue: dict, ctx: dict, model: str = REPLY_MODEL, tools: list | None = N
         msgs.append({"role": "user", "content": results})
     rec = {**(out or {"label": None, "duplicate_of": None, "reply": "", "confidence": 0.0}),
            "error": None if out else "no_submit", "stop_reason": stop, "steps": step + 1, "tool_calls": calls,
-           "usage": usage, "cost": cost(model, usage), "latency_s": round(time.monotonic() - t0, 3), "model": model,
-           "capped": capped}
+           "usage": usage, "cost": cost(model, usage, cli_cost), "latency_s": round(time.monotonic() - t0, 3), "model": model,
+           "capped": capped, "backend": getattr(client, "backend", "api")}
     if runs_dir:  # route() traces one combined record instead
         trace({"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "repo": ctx["repo"],
               "number": issue["number"], "input": prompt, **rec}, runs_dir)

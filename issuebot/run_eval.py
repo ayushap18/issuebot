@@ -14,7 +14,7 @@ from datetime import date
 from pathlib import Path
 
 from issuebot import agent
-from issuebot.judge import CAUSES, JUDGE_MODEL, judge, tag_failure
+from issuebot.judge import CAUSES, JUDGE_MODEL, judge, judge_backend, tag_failure
 from issuebot.tools import LABELS, SUBMIT, checkout, clone
 
 
@@ -32,7 +32,8 @@ def load(path: str, split: str = "all", limit: int | None = None, stratify: bool
 
 
 def run_case(row: dict, src: Path, mode: str, model: str, client, do_judge: bool = True,
-             threshold: float = agent.ROUTE_THRESHOLD, corpus: list | None = None) -> dict:
+             threshold: float = agent.ROUTE_THRESHOLD, corpus: list | None = None,
+             judge_client=None, judge2_client=None) -> dict:
     gold = row.get("label_override") or row["gold_label"]
     case = {"number": row["number"], "created_at": row["created_at"], "gold": gold,
             "gold_dup": row.get("gold_duplicate_of"), "pred": None, "pred_dup": None, "confidence": 0.0,
@@ -49,11 +50,18 @@ def run_case(row: dict, src: Path, mode: str, model: str, client, do_judge: bool
             rec = agent.run(issue, ctx, model, client=client)
         case.update(pred=rec["label"], pred_dup=rec["duplicate_of"], confidence=rec["confidence"], cost=rec["cost"],
                     latency_s=rec["latency_s"], steps=rec["steps"], error=rec["error"], reply=rec["reply"],
-                    route=rec.get("route"), capped=rec.get("capped"),
+                    route=rec.get("route"), capped=rec.get("capped"), backend=rec.get("backend"),
                     tool_calls=[{"name": t["name"], "input": t["input"]} for t in rec.get("tool_calls", [])])
         if do_judge and rec["reply"]:
-            j = judge(issue, row["maintainer_reply"], rec["reply"], client=client)
+            j = judge(issue, row["maintainer_reply"], rec["reply"], client=judge_client or client)
             case.update(score=j["score"], wrong=j["wrong"], judge_cost=j["cost"], judge_reason=j["reason"])
+        if do_judge and judge2_client and rec["reply"]:
+            try:  # a second-judge failure must not lose the first judge's score
+                j = judge(issue, row["maintainer_reply"], rec["reply"], client=judge2_client)
+                case.update(judge2_score=j["score"], judge2_wrong=j["wrong"], judge2_reason=j["reason"])
+                case["judge_cost"] += j["cost"]
+            except Exception as e:
+                case["judge2_error"] = f"{type(e).__name__}: {e}"
     except Exception as e:  # one broken case must not kill a 300-case run
         case["error"] = f"{type(e).__name__}: {e}"
     if do_judge and case["score"] is None and not case["reply"]:  # no reply scores 1, so a flakier system isn't judged on an easier subset; judge errors stay None
@@ -239,6 +247,18 @@ def calibrate(grading: str, results: str) -> bool:
     return k >= 0.6
 
 
+def agreement(cases: list[dict]) -> dict:
+    """Judge vs judge2 on cases both scored: cross-model agreement on the same drafts."""
+    both = [c for c in cases if c["score"] is not None and c.get("judge2_score") is not None]
+    if not both:
+        return {"n": 0}
+    a, b = [c["score"] for c in both], [c["judge2_score"] for c in both]
+    return {"n": len(both), "exact": _mean(x == y for x, y in zip(a, b)),
+            "within1": _mean(abs(x - y) <= 1 for x, y in zip(a, b)), "weighted_kappa": kappa(a, b, weighted=True),
+            "wrong_kappa": kappa([bool(c["wrong"]) for c in both], [bool(c["judge2_wrong"]) for c in both]),
+            "judge2_mean": _mean(b)}
+
+
 def failed(c: dict) -> bool:
     return (c["pred"] != c["gold"] or (c["gold"] == "duplicate" and not dup_hit(c))
             or (c["score"] is not None and c["score"] <= 2) or bool(c["wrong"]))
@@ -248,7 +268,7 @@ def tag_failures(results: str, dataset: str, client=None) -> bool:
     """Tag each failed case's primary cause in place; True = Stage 3 trigger (retrieval_miss >= 30%)."""
     res = json.loads(Path(results).read_text())
     rows = {r["number"]: r for r in load(dataset)}
-    client = client or agent.make_client()
+    client = client or agent.make_client(judge_backend())
     fails = [c for c in res["cases"] if failed(c)]
     errors = 0
     for c in fails:
@@ -289,6 +309,8 @@ def main() -> None:
     ap.add_argument("--export-grading", metavar="RESULTS", help="write a blind hand-grading CSV to stdout")
     ap.add_argument("--n", type=int, default=50, help="--export-grading sample size")
     ap.add_argument("--calibrate", nargs=2, metavar=("CSV", "RESULTS"), help="judge vs hand grades; exit 1 if kappa < 0.6")
+    ap.add_argument("--judge2", choices=["agy", "codex", "claude-cli"],
+                    help="second judge on another model; scores stored as judge2_*, agreement reported")
     ap.add_argument("--tag-failures", metavar="RESULTS", help="tag each failure's cause in place (Stage 3 trigger)")
     a = ap.parse_args()
     if a.tag_failures:
@@ -308,26 +330,33 @@ def main() -> None:
     rows = load(a.dataset, a.split, a.limit, a.stratify)
     short = a.model.removeprefix("claude-").split("-2025")[0]
     name = a.name or f"{a.mode}-{short}-{a.split}-{date.today()}"
-    client = agent.make_client()
+    client, jb = agent.make_client(), judge_backend()
+    jclient, j2client = agent.make_client(jb), a.judge2 and agent.make_client(a.judge2)
     srcs = {r: clone(r) for r in {row["repo"] for row in rows}}  # fetch once, not per case
     cases = []
     for row in rows:
-        c = run_case(row, srcs[row["repo"]], a.mode, a.model, client, not a.no_judge, a.threshold)
+        c = run_case(row, srcs[row["repo"]], a.mode, a.model, client, not a.no_judge, a.threshold,
+                     judge_client=jclient, judge2_client=j2client)
         cases.append(c)
         print(f"#{c['number']} {c['gold']}->{c['pred']} dup={c['pred_dup'] or '-'} score={c['score'] or '-'} "
               f"${c['cost'] + c['judge_cost']:.3f} {c['latency_s'] or 0:.1f}s{' ERR ' + c['error'] if c['error'] else ''}",
               flush=True)
     m = metrics(cases)
+    if a.judge2:
+        m["judge_agreement"] = agreement(cases)
     try:
         commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() or None
     except OSError:
         commit = None
     out = {"name": name, "mode": a.mode, "model": a.model, "judge_model": None if a.no_judge else JUDGE_MODEL,
+           "backend": getattr(client, "backend", "api"), "judge_backend": None if a.no_judge else jb, "judge2_backend": a.judge2,
            "split": a.split, "n": len(cases), "issuebot_commit": commit,
            "dataset_sha256": hashlib.sha256(Path(a.dataset).read_bytes()).hexdigest(), "metrics": m, "cases": cases}
     Path("results").mkdir(exist_ok=True)
     Path(f"results/{name}.json").write_text(json.dumps(out, indent=1))
     print(json.dumps({k: v for k, v in m.items() if not isinstance(v, dict)}, indent=1))
+    if a.judge2:
+        print(f"judge ({jb}) vs judge2 ({a.judge2}): {json.dumps(m['judge_agreement'])}")
     print(f"wrote results/{name}.json")
     if os.environ.get("ISSUEBOT_REPLAY") == "replay" and any("replay miss" in (c["error"] or "") for c in cases):
         print("::notice::eval-gate skipped: replay cache misses (fork PR without API key)")
