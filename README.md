@@ -97,6 +97,16 @@ The judge (`issuebot/judge.py`, Haiku 4.5, JSON-schema structured output) grades
 
 `--compare A B` pairs two result files by issue number and prints deltas with a 95% paired-bootstrap CI. A change counts as an improvement only if the CI excludes 0.
 
+`--gate BASELINE [NEW]` is the CI regression gate. It pairs NEW (or, without NEW, the results of the run it is attached to) with BASELINE, prints a markdown table (metric | baseline | new | delta | CI | verdict, also appended to `$GITHUB_STEP_SUMMARY`), and exits 1 only when a drop is outside the 95% CI **and** past its floor: label accuracy -3pts, dup precision -5pts, judge mean -0.2. `--stratify` makes `--limit` round-robin over gold labels so a small slice still covers every class.
+
+`.github/workflows/eval-gate.yml` runs it on PRs touching `issuebot/**`: `--split dev --limit 40 --stratify --gate eval/baseline.json`. By convention the baseline is `eval/baseline.json` (a results file from that exact command on main) and its replay cache is `eval/replay/` (`ISSUEBOT_REPLAY_DIR`). Neither is committed yet, so the gate currently skips with a notice. With the `ANTHROPIC_API_KEY` secret it runs in record mode (cache hits free, misses live); without it (fork PRs) it runs replay-only if `eval/replay/` exists, otherwise skips. To create them:
+
+```bash
+ISSUEBOT_REPLAY=record ISSUEBOT_REPLAY_DIR=eval/replay \
+  python -m issuebot.run_eval --split dev --limit 40 --stratify --name baseline
+cp results/baseline.json eval/baseline.json
+```
+
 ## Results
 
 No numbers yet. Every row below is a placeholder until it is produced by the harness and committed to `results/`.
@@ -139,7 +149,7 @@ python -m issuebot.run_eval --compare results/A.json results/B.json
 
 Routed mode runs Haiku triage first and only runs the Sonnet agent when Haiku's confidence is below `--threshold` or the label is `bug`/`question`; the trace records `route`, `triage_cost` and `draft_cost`. Every run stops tool-looping at $0.15 (`CEILING`), takes one submit-only step, and records `capped: true`.
 
-Other flags: `--name NAME`, `--no-judge`, `--dataset PATH`, `--split dev|test|all`.
+Other flags: `--name NAME`, `--stratify`, `--gate BASELINE [NEW]`, `--no-judge`, `--dataset PATH`, `--split dev|test|all`.
 
 Replay cache: `ISSUEBOT_REPLAY=record` stores every model call (agent and judge) under `cache/replay/` (override with `ISSUEBOT_REPLAY_DIR`), keyed on the sha256 of the full request. `ISSUEBOT_REPLAY=replay` serves only from the cache and fails on a miss, so unchanged cases cost $0 and need no API key.
 

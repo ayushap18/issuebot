@@ -1,8 +1,10 @@
 """Run the agent (or the no-tools baseline) over the eval set, score it, write results/<name>.json."""
 import argparse
 import hashlib
+import itertools
 import json
 import math
+import os
 import random
 import statistics
 import subprocess
@@ -14,9 +16,14 @@ from issuebot.judge import JUDGE_MODEL, judge
 from issuebot.tools import LABELS, SUBMIT, checkout, clone
 
 
-def load(path: str, split: str = "all", limit: int | None = None) -> list[dict]:
+def load(path: str, split: str = "all", limit: int | None = None, stratify: bool = False) -> list[dict]:
     rows = [json.loads(l) for l in Path(path).read_text().splitlines() if l.strip()]
     rows = [r for r in rows if split == "all" or r["split"] == split]
+    if stratify and limit:  # round-robin over gold labels in file order: deterministic, balanced until a label runs out
+        groups = {}
+        for r in rows:
+            groups.setdefault(r.get("label_override") or r["gold_label"], []).append(r)
+        rows = [r for tier in itertools.zip_longest(*(groups[k] for k in sorted(groups))) for r in tier if r]
     return rows[:limit] if limit else rows
 
 
@@ -122,7 +129,9 @@ def bootstrap(a: list[dict], b: list[dict], key, n: int = 1000, seed: int = 0) -
     pairs = [(x, y) for x, y in pairs if x is not None and y is not None]
     if not pairs:
         return 0.0, 0.0, 0.0
-    delta = lambda ps: sum(y - x for x, y in ps) / len(ps)
+    # key may return (num, den) for a ratio metric like precision; a plain float is (x, 1), i.e. a mean
+    rate = lambda xs: _div(*map(sum, zip(*(x if isinstance(x, tuple) else (x, 1) for x in xs))))
+    delta = lambda ps: rate(y for _, y in ps) - rate(x for x, _ in ps)
     rng = random.Random(seed)
     ds = sorted(delta([rng.choice(pairs) for _ in pairs]) for _ in range(n))
     return delta(pairs), ds[int(0.025 * n)], ds[int(0.975 * n) - 1]
@@ -146,6 +155,39 @@ def compare(pa: str, pb: str) -> None:
         print(f"{k:18} {d:+.4f}  95% CI [{lo:+.4f}, {hi:+.4f}] {sig}")
 
 
+# metric -> (paired key, floor). The gate fails only when the 95% CI is entirely below 0 AND the drop exceeds the floor.
+GATE = {
+    "label_accuracy": (COMPARE["label_accuracy"], 0.03),
+    "dup_precision": (lambda c: (float(dup_hit(c)), float(c["pred"] == "duplicate")), 0.05),
+    "judge_mean": (COMPARE["judge_mean"], 0.2),
+}
+
+
+def gate(pa: str, pb: str) -> bool:
+    """Compare results pb to baseline pa on their shared cases; print a markdown table; True = pass."""
+    a, b = (json.loads(Path(x).read_text())["cases"] for x in (pa, pb))
+    shared = {c["number"] for c in a} & {c["number"] for c in b}
+    ma, mb = (metrics([c for c in cs if c["number"] in shared]) for cs in (a, b))
+    lines, ok = [f"Eval gate: {pb} vs baseline {pa} ({len(shared)} shared cases)", "",
+                 "| metric | baseline | new | delta | CI | verdict |", "|---|---|---|---|---|---|"], True
+    for k, (f, floor) in GATE.items():
+        if ma.get(k) is None or mb.get(k) is None:  # e.g. judge_mean on a --no-judge run
+            lines.append(f"| {k} | {ma.get(k)} | {mb.get(k)} | | | n/a |")
+            continue
+        d, lo, hi = bootstrap(a, b, f)
+        bad = hi < 0 and d < -floor
+        ok &= not bad
+        lines.append(f"| {k} | {ma[k]:.3f} | {mb[k]:.3f} | {d:+.3f} | [{lo:+.3f}, {hi:+.3f}] | "
+                     f"{'FAIL' if bad else 'pass'} |")
+    lines.append(f"\n**{'PASS' if ok else 'FAIL'}** (fails only past the CI and floors: label -3pts, dup precision -5pts, judge -0.2)")
+    out = "\n".join(lines)
+    print(out)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+            fh.write(out + "\n")
+    return ok
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", default="agent", choices=["agent", "baseline", "routed"])
@@ -157,11 +199,18 @@ def main() -> None:
     ap.add_argument("--no-judge", action="store_true")
     ap.add_argument("--dataset", default="eval/dataset.jsonl")
     ap.add_argument("--compare", nargs=2, metavar=("A", "B"))
+    ap.add_argument("--stratify", action="store_true", help="balance --limit across gold labels")
+    ap.add_argument("--gate", nargs="+", metavar="FILE",
+                    help="BASELINE [NEW]: gate NEW (or this run's results) against BASELINE; exit 1 on regression")
     a = ap.parse_args()
     if a.compare:
         return compare(*a.compare)
+    if a.gate and len(a.gate) > 2:
+        ap.error("--gate takes BASELINE [NEW]")
+    if a.gate and len(a.gate) == 2:
+        raise SystemExit(0 if gate(*a.gate) else 1)
 
-    rows = load(a.dataset, a.split, a.limit)
+    rows = load(a.dataset, a.split, a.limit, a.stratify)
     short = a.model.removeprefix("claude-").split("-2025")[0]
     name = a.name or f"{a.mode}-{short}-{a.split}-{date.today()}"
     client = agent.make_client()
@@ -185,6 +234,8 @@ def main() -> None:
     Path(f"results/{name}.json").write_text(json.dumps(out, indent=1))
     print(json.dumps({k: v for k, v in m.items() if not isinstance(v, dict)}, indent=1))
     print(f"wrote results/{name}.json")
+    if a.gate:
+        raise SystemExit(0 if gate(a.gate[0], f"results/{name}.json") else 1)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from fake import FakeClient, msg, text
@@ -116,6 +118,73 @@ class MetricsTest(unittest.TestCase):
         self.assertGreater(lo, 0)
         self.assertLessEqual(lo, d)
         self.assertLessEqual(d, hi)
+
+
+def results(cases, d):
+    p = Path(d) / f"r{len(list(Path(d).iterdir()))}.json"
+    p.write_text(json.dumps({"name": p.stem, "cases": cases}))
+    return str(p)
+
+
+def suite(n_wrong, n=100, score=4):
+    # n cases, 20 of them duplicates; the first n_wrong get label, dup and judge all wrong
+    labs = ["bug", "question", "feature", "duplicate", "bug"]
+    out = []
+    for i in range(n):
+        g = labs[i % 5]
+        gd = 1000 + i if g == "duplicate" else None
+        w = i < n_wrong
+        out.append(case(i, g, "question" if w and g != "question" else ("bug" if w else g), 0.9,
+                        1 if w else score, w, 1.0, gd=gd, pd=None if w else gd))
+    return out
+
+
+class GateTest(unittest.TestCase):
+    def gate(self, a, b):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": ""}), \
+                mock.patch("builtins.print") as pr:
+            ok = run_eval.gate(results(a, d), results(b, d))
+        return ok, pr.call_args.args[0]
+
+    def test_equal_passes(self):
+        ok, out = self.gate(suite(10), suite(10))
+        self.assertTrue(ok)
+        self.assertIn("| metric | baseline | new | delta | CI | verdict |", out)
+
+    def test_big_drop_fails(self):
+        ok, out = self.gate(suite(10), suite(50))
+        self.assertFalse(ok)
+        self.assertIn("| label_accuracy | 0.900 | 0.500 | -0.400 |", out)
+        self.assertIn("FAIL |", out)
+
+    def test_small_drop_within_floors_passes(self):
+        ok, _ = self.gate(suite(10), suite(12))  # -2pts label, judge -0.06: under the floors
+        self.assertTrue(ok)
+
+    def test_ratio_bootstrap_is_precision(self):
+        a = [case(i, "duplicate", "duplicate", 0.9, 4, False, 1.0, gd=i, pd=i) for i in range(4)]
+        b = [case(i, "duplicate", "duplicate" if i < 2 else "bug", 0.9, 4, False, 1.0, gd=i, pd=i if i else 9)
+             for i in range(4)]
+        d, _, _ = run_eval.bootstrap(a, b, run_eval.GATE["dup_precision"][0])
+        self.assertAlmostEqual(d, 0.5 - 1.0)  # b: 1 hit of 2 predicted duplicates
+
+
+class StratifyTest(unittest.TestCase):
+    def test_deterministic_and_balanced(self):
+        labs = ["bug"] * 30 + ["question"] * 15 + ["feature"] * 8 + ["duplicate"] * 3
+        rows = [{"number": i, "split": "dev", "gold_label": l} for i, l in enumerate(labs)]
+        rows[0]["label_override"] = "feature"
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "ds.jsonl"
+            p.write_text("\n".join(map(json.dumps, rows)))
+            got = run_eval.load(str(p), "dev", 20, stratify=True)
+            self.assertEqual(got, run_eval.load(str(p), "dev", 20, stratify=True))
+            self.assertEqual(run_eval.load(str(p), "dev", 20), rows[:20])  # unchanged without the flag
+        count = lambda l: sum((r.get("label_override") or r["gold_label"]) == l for r in got)
+        self.assertEqual(len(got), 20)
+        self.assertEqual(count("duplicate"), 3)  # a small class is taken whole
+        self.assertEqual([count(l) for l in ("bug", "feature", "question")], [6, 6, 5])  # rest split evenly, label order breaks ties
+        self.assertEqual(len({r["number"] for r in got}), 20)
 
 
 class JudgeTest(unittest.TestCase):

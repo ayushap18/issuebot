@@ -1,0 +1,32 @@
+name: eval-gate
+on:
+  pull_request:
+    paths: ["issuebot/**"]
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e .
+      - name: Run 40-case stratified slice and gate against eval/baseline.json
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ISSUEBOT_REPLAY_DIR: eval/replay
+        run: |
+          if [ ! -f eval/baseline.json ] || [ ! -f eval/dataset.jsonl ]; then
+            echo "::notice::eval-gate skipped: no committed eval/baseline.json + eval/dataset.jsonl"; exit 0
+          fi
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            export ISSUEBOT_REPLAY=record   # cache hits are free, misses (changed prompts/tools) call the API
+          elif [ -d eval/replay ]; then
+            export ISSUEBOT_REPLAY=replay   # no key (forks): serve from the committed cache only
+          else
+            echo "::notice::eval-gate skipped: no ANTHROPIC_API_KEY secret (fork PR?) and no eval/replay cache"; exit 0
+          fi
+          python -m issuebot.run_eval --split dev --limit 40 --stratify --name gate --gate eval/baseline.json
