@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest import mock
 
+import httpx
+
 from fake import FakeClient, msg, submit, text, tool, usage
 from issuebot import agent
 from issuebot.tools import SUBMIT
@@ -193,7 +195,9 @@ class ActionModeTest(unittest.TestCase):
     REC = {"label": "bug", "duplicate_of": None, "reply": "Need a repro.", "confidence": 0.9, "cost": 0.05,
            "steps": 3, "error": None}
 
-    def main(self, mode=None, label_map="{}", routed="false", toml=None, env=None):
+    UNLOCKED = {"o/r": {"kept_rate": 0.95, "n": 120, "status": "comment", "updated": "2026-10-01T00:00:00+00:00"}}
+
+    def main(self, mode=None, label_map="{}", routed="false", toml=None, env=None, status=UNLOCKED):
         with tempfile.TemporaryDirectory() as d:
             ev = Path(d) / "event.json"
             ev.write_text(json.dumps({"action": "opened", "issue": ISSUE, "repository": {"full_name": "o/r"}}))
@@ -208,6 +212,7 @@ class ActionModeTest(unittest.TestCase):
             with mock.patch.dict("os.environ", env), mock.patch("sys.argv", argv), \
                     mock.patch.object(agent, "run", return_value=self.REC) as self.run_mock, \
                     mock.patch.object(agent, "route", return_value={**self.REC, "reply": "routed", "route": "haiku"}), \
+                    mock.patch.object(agent, "fetch_status", return_value=status) as self.fetch, \
                     mock.patch.object(agent, "gh") as gh, mock.patch("builtins.print"):
                 agent.main()
             return gh, summary.read_text() if summary.exists() else ""
@@ -290,6 +295,56 @@ class ActionModeTest(unittest.TestCase):
         self.run_mock.assert_not_called()
         gh.assert_not_called()
         self.assertIn("skipped", summary)
+
+
+    def test_status_caps_mode(self):
+        gh, summary = self.main("comment", status={"o/r": {"kept_rate": 0.5, "n": 30, "status": "shadow"}})
+        gh.assert_not_called()  # auto-demoted
+        self.assertIn("repo status shadow (label kept 50% over 30 issues)", summary)
+        gh, _ = self.main("label", status={"o/r": {"kept_rate": 0.8, "n": 40, "status": "label"}})
+        gh.assert_called_once()  # label stays label
+        gh, _ = self.main("label")  # comment status never raises a configured mode
+        self.assertEqual([c.args[0] for c in gh.call_args_list], ["/repos/o/r/issues/42/labels"])
+
+    def test_status_fail_closed(self):
+        for status, why in ((None, "status fetch failed"), ({"x/y": {"status": "comment"}}, "o/r not in status.json")):
+            gh, summary = self.main("comment", status=status)
+            self.assertEqual([c.args[0] for c in gh.call_args_list], ["/repos/o/r/issues/42/labels"])
+            self.assertIn(why, summary)
+            gh, _ = self.main("label", status=status)
+            gh.assert_called_once()
+
+    def test_shadow_skips_status_fetch(self):
+        self.main("shadow")
+        self.fetch.assert_not_called()
+
+
+class StatusTest(unittest.TestCase):
+    def test_effective_mode_is_min(self):
+        st = lambda s: {"o/r": {"status": s, "kept_rate": 0.9, "n": 100}}
+        for mode, s, want in [("comment", "label", "label"), ("comment", "comment", "comment"), ("label", "comment", "label"),
+                              ("label", "shadow", "shadow"), ("shadow", "comment", "shadow"), ("comment", "shadow", "shadow")]:
+            self.assertEqual(agent.effective_mode(mode, "o/r", st(s))[0], want, (mode, s))
+        self.assertEqual(agent.effective_mode("comment", "o/r", {"o/r": {"status": "bogus"}})[0], "label")
+        self.assertEqual(agent.effective_mode("comment", "o/r", ["junk"])[0], "label")
+
+    def test_fetch_status_no_network(self):
+        def handler(req):
+            self.assertEqual(str(req.url), "https://example.test/s.json")
+            return httpx.Response(200, json={"o/r": {"status": "label"}})
+
+        with mock.patch.object(agent.tools, "_http", httpx.Client(transport=httpx.MockTransport(handler))), \
+                mock.patch.dict("os.environ", {"ISSUEBOT_STATUS_URL": "https://example.test/s.json"}):
+            self.assertEqual(agent.fetch_status(), {"o/r": {"status": "label"}})
+        for resp in (httpx.Response(404), httpx.Response(200, text="<html>")):
+            with mock.patch.object(agent.tools, "_http", httpx.Client(transport=httpx.MockTransport(lambda r: resp))):
+                self.assertIsNone(agent.fetch_status())
+
+        def down(req):
+            raise httpx.ConnectTimeout("timeout")
+
+        with mock.patch.object(agent.tools, "_http", httpx.Client(transport=httpx.MockTransport(down))):
+            self.assertIsNone(agent.fetch_status())
 
 
 class ConfigTest(unittest.TestCase):

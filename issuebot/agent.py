@@ -10,7 +10,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import anthropic
+import httpx
 
+from issuebot import tools
 from issuebot.tools import LABELS, SUBMIT, TOOLS, call, checkout, clone, gh, sha_at
 
 TRIAGE_MODEL = "claude-haiku-4-5"   # judge, label-only Action mode, cheap runs
@@ -153,6 +155,33 @@ def read_marker(body: str) -> dict | None:
 def _env(name: str, conv=str):
     v = os.environ.get(name)
     return conv(v) if v else None  # empty = action input left blank = not set
+
+
+MODES = ("shadow", "label", "comment")  # ascending; the effective mode is the lower of config and status
+STATUS_URL = "https://raw.githubusercontent.com/ayushap18/issuebot/main/eval/status.json"
+
+
+def fetch_status() -> dict | None:
+    """Per-repo unlock status written by the weekly feedback run; None if it can't be fetched."""
+    try:
+        r = tools._http.get(os.environ.get("ISSUEBOT_STATUS_URL") or STATUS_URL, timeout=5)
+        r.raise_for_status()
+        return r.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+def effective_mode(mode: str, repo: str, status: dict | None) -> tuple[str, str]:
+    """min(configured mode, the repo's status). Fails closed: no status means comment drops to label."""
+    s = status.get(repo) if isinstance(status, dict) else None
+    if not isinstance(s, dict) or s.get("status") not in MODES:
+        why = "status fetch failed" if status is None else f"{repo} not in status.json"
+        if mode == "comment":
+            return "label", f"{why}; comment needs a per-repo unlock, using label"
+        return mode, f"{why}; {mode} unaffected"
+    eff = min(mode, s["status"], key=MODES.index)
+    rate = "-" if s.get("kept_rate") is None else f"{s['kept_rate']:.0%}"
+    return eff, f"configured {mode}, repo status {s['status']} (label kept {rate} over {s.get('n', 0)} issues)"
 
 
 FOOTER = "\n\n---\n_Automated triage draft (issuebot). A maintainer will follow up._"
@@ -336,6 +365,9 @@ def main() -> None:
         print(json.dumps({"dry_run": True, "repo": repo, "issue": n, "config": cfg,
                           "model": "routed" if cfg["routed"] else a.model, "prompt": render(issue, repo)}, indent=2))
         return
+    why = None
+    if a.event and mode != "shadow":  # shadow is already the floor; skip the fetch
+        mode, why = effective_mode(mode, repo, fetch_status())
     rec = (route(issue, ctx, cfg["threshold"], ceiling=ceiling) if cfg["routed"]
            else run(issue, ctx, a.model, max_steps=a.max_steps, ceiling=ceiling))
 
@@ -354,7 +386,7 @@ def main() -> None:
         acted.append("commented")
     if path := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(path, "a") as f:
-            f.write(f"## issuebot: #{n} ({mode})\n\n| label | duplicate_of | confidence | cost | route | steps |\n"
+            f.write(f"## issuebot: #{n} ({mode})\n\nMode: {mode} ({why or 'configured'})\n\n| label | duplicate_of | confidence | cost | route | steps |\n"
                     f"|---|---|---|---|---|---|\n| {rec['label']} | {rec['duplicate_of'] or '-'} | {rec['confidence']:.2f} | "
                     f"${rec['cost']:.4f} | {rec.get('route', a.model)} | {rec['steps']} |\n\nActions: {', '.join(acted) or 'none'}\n\n"
                     f"### Draft reply\n\n{no_mentions(rec['reply'], repo)}\n")

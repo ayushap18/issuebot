@@ -51,7 +51,7 @@ The Batch API takes 50% off and stacks with cache discounts. A cache write costs
 - [ ] Tag `v1` (the README tells adopters to use `@main` or a SHA until then) and install in shadow / label-only on 1-3 live repos.
 
 **Stage 1 deviations from "Abuse and security" below:**
-- Comment mode has no Stage 2 unlock yet; the unlock is the repo admin setting `mode = "comment"`.
+- Comment mode is gated per repo (Stage 2): the Action posts comments only when the repo admin sets `mode = "comment"` **and** `eval/status.json` (written weekly by `feedback.yml`) says `comment` (label kept >= 90% over the last 100 scored issues). Under 75% kept (n >= 20) the repo auto-demotes to shadow. If the status file can't be fetched or the repo isn't in it, comment falls back to label (fail closed).
 - The path denylist is `.git/`, `.env*`, `*.pem`, `*.key` (plus outside-the-checkout and symlink escapes). There is no `.github/workflows/` entry and no general path allowlist; the config's `docs` list only scopes `list_docs`.
 - There is no Haiku spam check; the free bot / new-account / monthly-cap filters are the whole pre-filter.
 - `label` is checked against the four built-in labels, not the repo's label map; unmapped labels get `label_prefix`.
@@ -89,7 +89,7 @@ Issue text is untrusted input from anyone on the internet. Design for that.
   - Tools are read-only.
   - Issue text is wrapped as data in the user turn, never in the system prompt.
   - Output must parse against the `{label, duplicate_of, reply, confidence}` schema, and `label` must be in the repo's label map.
-  - Default mode never posts text. Comment mode requires the per-repo unlock from Stage 2. **[Stage 1 deviation]** Until that exists, the unlock is the repo admin setting `mode = "comment"` (config or action input); posted replies have mentions, images, off-repo links and cross-repo refs defused.
+  - Default mode never posts text. Comment mode requires the per-repo unlock from Stage 2 (`eval/status.json`, fail closed to label) on top of the repo admin setting `mode = "comment"`; posted replies have mentions, images, off-repo links and cross-repo refs defused.
   - Adversarial issues live permanently in the eval set as regression cases.
 - **File exfiltration via `read_file` / `grep_repo`**:
   - Path allowlist from config. A hard denylist always applies: `.git/`, `.env*`, `*.pem`, `*.key`, `.github/workflows/` secrets context.

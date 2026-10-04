@@ -76,8 +76,9 @@ def read_rows(p: Path) -> list[dict]:
 
 
 def collect(repo: str, days: int, out: Path, baseline: float | None, now: datetime,
-            about: str = "") -> tuple[list[str], str]:
-    """Score one adopter; append misses to out/<owner>__<repo>.jsonl. Returns (DRIFT lines, markdown table row).
+            about: str = "") -> tuple[list[str], str, dict]:
+    """Score one adopter; append misses to out/<owner>__<repo>.jsonl. Returns (DRIFT lines, markdown table row,
+    {issue number: agree} for the decided issues).
     The window is issues created `days` days before now-7d, so every bot label has had its 7 days."""
     end, start = now - KEEP, now - KEEP - timedelta(days=days)
     issues = pages(f"/repos/{repo}/issues", {"state": "all", "sort": "created", "direction": "desc"},
@@ -101,7 +102,29 @@ def collect(repo: str, days: int, out: Path, baseline: float | None, now: dateti
         drift.append(f"DRIFT {repo}: predicted label {name!r} is not in the repo's current label set")
     fmt = lambda x: "-" if x is None else f"{x:.0%}"
     row = f"| {repo} | {len(rs)} | {len(decided)} | {fmt(agree)} | {fmt(baseline)} | {len(new)} | {'yes' if drift else 'no'} |"
-    return drift, row
+    return drift, row, {i["number"]: r["agree"] for i, r in decided}
+
+
+ROLL = 100  # status uses each adopter's last ROLL scored issues
+
+
+def unlock(rate: float | None, n: int) -> str:
+    """Per-repo mode ceiling: comment only after 100 scored issues at >= 90% kept; under 75% (n >= 20) back to shadow."""
+    if n >= ROLL and rate >= 0.90:
+        return "comment"
+    if n >= 20 and rate < 0.75:
+        return "shadow"
+    return "label"
+
+
+def update_status(scored: dict, status: dict, repo: str, outcomes: dict, now: datetime) -> None:
+    """Merge this run's outcomes into the rolling history (JSON keys are strings) and recompute the repo's status."""
+    hist = scored.get(repo, {}) | {str(k): v for k, v in outcomes.items()}
+    scored[repo] = {k: hist[k] for k in sorted(hist, key=int)[-ROLL:]}  # issue number ~ creation order
+    last = list(scored[repo].values())
+    rate = sum(last) / len(last) if last else None
+    status[repo] = {"kept_rate": rate, "n": len(last), "status": unlock(rate, len(last)),
+                    "updated": now.isoformat(timespec="seconds")}
 
 
 def promote(cand: Path, dataset: Path, min_n: int, force: bool) -> int:
@@ -162,15 +185,21 @@ def main(argv: list[str] | None = None) -> None:
     about = f" ({src} cases at confidence >= {conf}, n={len(cs)})"
     repos = [l.split("#")[0].strip() for l in Path("adopters.txt").read_text().splitlines()]
     now, drift, table = datetime.now(timezone.utc), [], []
+    sp, tp = Path("eval/scored.json"), Path("eval/status.json")
+    scored, status = (json.loads(p.read_text()) if p.exists() else {} for p in (sp, tp))
     for repo in filter(None, repos):
-        d, row = collect(repo, a.days, out, baseline, now, about)
+        d, row, outcomes = collect(repo, a.days, out, baseline, now, about)
+        update_status(scored, status, repo, outcomes, now)
         drift += d
-        table.append(row)
+        table.append(row + f" {status[repo]['status']} ({status[repo]['n']}) |")
+    tp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text(json.dumps(scored, indent=1, sort_keys=True) + "\n")
+    tp.write_text(json.dumps(status, indent=1, sort_keys=True) + "\n")
     print("\n".join(drift))
     md = "\n".join([f"## issuebot feedback ({a.days} days, ending 7 days ago)", "",
                     f"Baseline: {'-' if baseline is None else f'{baseline:.0%}'}{about}", "",
-                    "| repo | bot-touched | decided | agreement | baseline | new candidates | drift |",
-                    "|---|---|---|---|---|---|---|", *table, "", *[f"- {d}" for d in drift]])
+                    "| repo | bot-touched | decided | agreement | baseline | new candidates | drift | status (n) |",
+                    "|---|---|---|---|---|---|---|---|", *table, "", *[f"- {d}" for d in drift]])
     print(md)
     if path := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(path, "a") as fh:

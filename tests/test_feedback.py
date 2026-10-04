@@ -53,7 +53,7 @@ class FeedbackTest(unittest.TestCase):
             f.write_text("".join(json.dumps(r) + "\n" for r in existing))
         fake = FakeGH(issues, timelines, *([labels] if labels else []))
         with mock.patch.object(build_eval, "gh", fake):
-            drift, row = feedback.collect("o/r", 7, d, baseline, NOW)
+            drift, row, self.outcomes = feedback.collect("o/r", 7, d, baseline, NOW)
         return drift, row, feedback.read_rows(f)
 
     def test_label_kept_vs_removed_within_7_days(self):
@@ -79,6 +79,7 @@ class FeedbackTest(unittest.TestCase):
         # gold() label names are vitest's, so non-duplicate misses wait for a hand label
         self.assertEqual((rows[0]["gold_label"], rows[0]["sha"], rows[0]["maintainer_reply"]), (None, None, REPLY))
         self.assertIn("| o/r | 2 | 2 | 50% |", row)
+        self.assertEqual(self.outcomes, {1: False, 2: True})
         _, _, again = self.run_collect(issues, tl, existing=rows)
         self.assertEqual(len(again), 1)
 
@@ -136,6 +137,25 @@ class FeedbackTest(unittest.TestCase):
         self.assertTrue(row.endswith("| yes |"))
         drift, _, _ = self.run_collect([iss(2)], tl, baseline=0.8, labels=("bot:feature",))
         self.assertEqual(drift, [])
+
+    def test_unlock_thresholds(self):
+        u = feedback.unlock
+        self.assertEqual([u(0.90, 100), u(0.89, 100), u(0.95, 99), u(0.74, 20), u(0.74, 19), u(0.75, 50), u(None, 0)],
+                         ["comment", "label", "label", "shadow", "label", "label", "label"])
+
+    def test_status_rolls_over_last_100(self):
+        scored, status = {}, {}
+        feedback.update_status(scored, status, "o/r", {n: n > 15 for n in range(1, 101)}, NOW)  # 85 kept of 100
+        self.assertEqual((status["o/r"]["n"], status["o/r"]["kept_rate"], status["o/r"]["status"]), (100, 0.85, "label"))
+        feedback.update_status(scored, status, "o/r", {n: True for n in range(101, 111)}, NOW)  # drops #1-#10
+        self.assertEqual((status["o/r"]["n"], status["o/r"]["kept_rate"], status["o/r"]["status"]), (100, 0.95, "comment"))
+        self.assertEqual(min(map(int, scored["o/r"])), 11)
+        json.dumps(scored)  # string keys round-trip through the file
+        feedback.update_status(scored, status, "x/y", {1: False, 2: True}, NOW)
+        self.assertEqual(status["x/y"]["status"], "label")
+        self.assertEqual(status["x/y"]["updated"], "2026-10-20T00:00:00+00:00")
+        feedback.update_status(scored, status, "x/y", {n: False for n in range(3, 23)}, NOW)
+        self.assertEqual(status["x/y"]["status"], "shadow")
 
     def test_promote_threshold_dedup_and_split(self):
         d = Path(tempfile.mkdtemp())

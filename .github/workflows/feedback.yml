@@ -21,12 +21,12 @@ jobs:
         run: |
           set -o pipefail
           python -m issuebot.feedback | tee feedback.out
-      - name: Commit candidate files
+      - name: Commit candidates and per-repo unlock status
         run: |
-          mkdir -p eval/candidates && git add eval/candidates
+          mkdir -p eval/candidates && git add eval/candidates eval/status.json eval/scored.json
           if ! git diff --cached --quiet; then
             git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com \
-              commit -m "Update feedback candidates"
+              commit -m "Update feedback candidates and status"
             git push
           fi
       - name: Open one drift issue per repo
