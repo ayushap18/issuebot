@@ -133,8 +133,11 @@ Run the baseline, then the agent. Start small on dev:
 python -m issuebot.run_eval --mode baseline --split dev --limit 40
 python -m issuebot.run_eval --mode agent    --split dev --limit 40
 python -m issuebot.run_eval --mode agent    --split dev --limit 40 --model claude-haiku-4-5
+python -m issuebot.run_eval --mode routed   --split dev --limit 40 --threshold 0.8
 python -m issuebot.run_eval --compare results/A.json results/B.json
 ```
+
+Routed mode runs Haiku triage first and only runs the Sonnet agent when Haiku's confidence is below `--threshold` or the label is `bug`/`question`; the trace records `route`, `triage_cost` and `draft_cost`. Every run stops tool-looping at $0.15 (`CEILING`), takes one submit-only step, and records `capped: true`.
 
 Other flags: `--name NAME`, `--no-judge`, `--dataset PATH`, `--split dev|test|all`.
 
@@ -188,6 +191,8 @@ jobs:
 | `min-confidence` | `0.8` | nothing is written below this |
 | `label-map` | `{}` | JSON from issuebot labels to your repo's labels, e.g. `{"bug":"bug","question":"question"}`. Unmapped labels are never applied |
 | `max-steps` | `8` | |
+| `routed` | `false` | `true` = Haiku triage first; Sonnet drafts only when unsure or the label is bug/question |
+| `threshold` | `0.8` | routed mode confidence gate |
 
 Posted comments carry a footer saying they are an automated triage draft. The action only reads the repo, and only triggers on `issues.opened` (never `pull_request_target`).
 

@@ -165,6 +165,13 @@ class RunCaseTest(unittest.TestCase):
         self.assertIsNone(c["pred"])
         self.assertEqual((c["score"], c["wrong"]), (1, False))  # failures count in judge metrics
 
+    def test_routed_mode_uses_route(self):
+        with mock.patch.object(run_eval, "checkout", return_value="/wt"), \
+                mock.patch.object(run_eval.agent, "route", return_value={**self.REC, "route": "haiku", "capped": False}) as r:
+            c = run_eval.run_case(self.ROW, "/src", "routed", "m", client=None, do_judge=False, threshold=0.6)
+        self.assertEqual(r.call_args.args[2], 0.6)
+        self.assertEqual((c["route"], c["capped"]), ("haiku", False))
+
 
 if __name__ == "__main__":
     unittest.main()

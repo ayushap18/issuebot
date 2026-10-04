@@ -90,6 +90,46 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(fc.calls[0]["output_config"], {"effort": "medium"})
         self.assertNotIn("output_config", fc.calls[1])
 
+    def test_cost_cap_forces_submit_only_step(self):
+        fc = FakeClient(msg(tool("list_docs", {"subdir": "docs"}), u=usage(100_000, 0)),  # $0.20 on Sonnet
+                        msg(submit("bug")))
+        rec = self.run_agent(fc)
+        self.assertEqual(fc.calls[1]["tools"], [SUBMIT])
+        self.assertEqual((rec["label"], rec["capped"], rec["steps"]), ("bug", True, 2))
+        fc = FakeClient(msg(tool("list_docs", {"subdir": "docs"}), u=usage(100_000, 0)),
+                        msg(text("hmm"), stop="end_turn"))
+        rec = self.run_agent(fc)
+        self.assertEqual((len(fc.calls), rec["error"], rec["capped"]), (2, "no_submit", True))
+        self.assertFalse(self.run_agent(FakeClient(msg(submit())))["capped"])
+
+    def route(self, *responses, **kw):
+        fc = FakeClient(*responses)
+        return fc, agent.route(ISSUE, self.ctx, client=fc, runs_dir=self.tmp.name, **kw)
+
+    def test_route_skips_sonnet_when_haiku_confident_on_non_reply_label(self):
+        fc, rec = self.route(msg(submit("feature", conf=0.9)))
+        self.assertEqual([c["model"] for c in fc.calls], [agent.TRIAGE_MODEL])
+        self.assertEqual((rec["route"], rec["label"], rec["draft_cost"]), ("haiku", "feature", 0.0))
+        self.assertEqual(rec["cost"], rec["triage_cost"])
+
+    def test_route_escalates(self):
+        for first, kw in ((submit("feature", conf=0.5), {}), (submit("bug", conf=0.95), {}),
+                          (submit("duplicate", dup=7, conf=0.9), {"threshold": 0.95})):
+            fc, rec = self.route(msg(first), msg(submit("question", conf=0.7)), **kw)
+            self.assertEqual([c["model"] for c in fc.calls], [agent.TRIAGE_MODEL, agent.REPLY_MODEL])
+            self.assertEqual((rec["route"], rec["label"], rec["model"]), ("sonnet", "question", agent.REPLY_MODEL))
+            self.assertAlmostEqual(rec["cost"], rec["triage_cost"] + rec["draft_cost"])
+            self.assertGreater(rec["draft_cost"], rec["triage_cost"])
+
+    def test_route_trace_one_combined_line(self):
+        self.route(msg(submit("bug", conf=0.95)), msg(submit("bug", conf=0.9)))
+        lines = next(Path(self.tmp.name).glob("*.jsonl")).read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        line = json.loads(lines[0])
+        for k in ("route", "triage", "triage_cost", "draft_cost", "cost", "capped", "input"):
+            self.assertIn(k, line)
+        self.assertEqual((line["route"], line["triage"]["label"], line["capped"]), ("sonnet", "bug", False))
+
     def test_baseline_tools(self):
         fc = FakeClient(msg(submit()))
         self.run_agent(fc, tools=[SUBMIT], max_steps=2)
@@ -124,18 +164,24 @@ class ActionModeTest(unittest.TestCase):
     REC = {"label": "bug", "duplicate_of": None, "reply": "Need a repro.", "confidence": 0.9, "cost": 0.05,
            "steps": 3, "error": None}
 
-    def main(self, mode, label_map="{}"):
+    def main(self, mode, label_map="{}", routed="false"):
         with tempfile.TemporaryDirectory() as d:
             ev = Path(d) / "event.json"
             ev.write_text(json.dumps({"issue": ISSUE, "repository": {"full_name": "o/r"}}))
             summary = Path(d) / "summary.md"
-            env = {"GITHUB_STEP_SUMMARY": str(summary), "ISSUEBOT_LABEL_MAP": label_map, "ISSUEBOT_MIN_CONFIDENCE": "0.8"}
+            env = {"GITHUB_STEP_SUMMARY": str(summary), "ISSUEBOT_LABEL_MAP": label_map, "ISSUEBOT_MIN_CONFIDENCE": "0.8",
+                   "ISSUEBOT_ROUTED": routed}
             argv = ["issuebot", "--event", str(ev), "--repo-dir", d, "--mode", mode]
             with mock.patch.dict("os.environ", env), mock.patch("sys.argv", argv), \
                     mock.patch.object(agent, "run", return_value=self.REC), \
+                    mock.patch.object(agent, "route", return_value={**self.REC, "reply": "routed"}), \
                     mock.patch.object(agent, "gh") as gh, mock.patch("builtins.print"):
                 agent.main()
             return gh, summary.read_text()
+
+    def test_routed_env_uses_route(self):
+        _, summary = self.main("shadow", routed="true")
+        self.assertIn("routed", summary)
 
     def test_shadow_posts_nothing(self):
         gh, summary = self.main("shadow", '{"bug": "bug"}')

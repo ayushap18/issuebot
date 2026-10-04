@@ -20,7 +20,8 @@ def load(path: str, split: str = "all", limit: int | None = None) -> list[dict]:
     return rows[:limit] if limit else rows
 
 
-def run_case(row: dict, src: Path, mode: str, model: str, client, do_judge: bool = True) -> dict:
+def run_case(row: dict, src: Path, mode: str, model: str, client, do_judge: bool = True,
+             threshold: float = agent.ROUTE_THRESHOLD) -> dict:
     gold = row.get("label_override") or row["gold_label"]
     case = {"number": row["number"], "created_at": row["created_at"], "gold": gold,
             "gold_dup": row.get("gold_duplicate_of"), "pred": None, "pred_dup": None, "confidence": 0.0,
@@ -31,10 +32,13 @@ def run_case(row: dict, src: Path, mode: str, model: str, client, do_judge: bool
         issue = {k: row[k] for k in ("number", "title", "body", "created_at")}  # the agent sees nothing else
         if mode == "baseline":  # same prompt and output, no retrieval tools: a clean ablation on one code path
             rec = agent.run(issue, ctx, model, tools=[SUBMIT], max_steps=2, client=client)
+        elif mode == "routed":  # Haiku triage, Sonnet draft only when needed; --model is ignored
+            rec = agent.route(issue, ctx, threshold, client=client)
         else:
             rec = agent.run(issue, ctx, model, client=client)
         case.update(pred=rec["label"], pred_dup=rec["duplicate_of"], confidence=rec["confidence"], cost=rec["cost"],
-                    latency_s=rec["latency_s"], steps=rec["steps"], error=rec["error"])
+                    latency_s=rec["latency_s"], steps=rec["steps"], error=rec["error"],
+                    route=rec.get("route"), capped=rec.get("capped"))
         if do_judge and rec["reply"]:
             j = judge(issue, row["maintainer_reply"], rec["reply"], client=client)
             case.update(score=j["score"], wrong=j["wrong"], judge_cost=j["cost"], judge_reason=j["reason"])
@@ -144,7 +148,8 @@ def compare(pa: str, pb: str) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", default="agent", choices=["agent", "baseline"])
+    ap.add_argument("--mode", default="agent", choices=["agent", "baseline", "routed"])
+    ap.add_argument("--threshold", type=float, default=agent.ROUTE_THRESHOLD, help="routed mode confidence gate")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--split", default="dev", choices=["dev", "test", "all"])
     ap.add_argument("--model", default=agent.REPLY_MODEL)
@@ -163,7 +168,7 @@ def main() -> None:
     srcs = {r: clone(r) for r in {row["repo"] for row in rows}}  # fetch once, not per case
     cases = []
     for row in rows:
-        c = run_case(row, srcs[row["repo"]], a.mode, a.model, client, not a.no_judge)
+        c = run_case(row, srcs[row["repo"]], a.mode, a.model, client, not a.no_judge, a.threshold)
         cases.append(c)
         print(f"#{c['number']} {c['gold']}->{c['pred']} dup={c['pred_dup'] or '-'} score={c['score'] or '-'} "
               f"${c['cost'] + c['judge_cost']:.3f} {c['latency_s'] or 0:.1f}s{' ERR ' + c['error'] if c['error'] else ''}",
