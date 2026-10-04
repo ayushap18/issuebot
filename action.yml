@@ -1,5 +1,8 @@
 name: issuebot
 description: Triage new issues and draft replies with your own Anthropic key. Shadow mode by default (posts nothing).
+branding:
+  icon: tag
+  color: blue
 # Job needs permissions: { issues: write, contents: read } and an actions/checkout step (persist-credentials: false).
 # ISSUEBOT_DRY_RUN=1 in the step env runs guards + config + prompt only (no model or write calls);
 # ISSUEBOT_EVENT overrides the event payload path (used by this repo's smoke test).
