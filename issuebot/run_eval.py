@@ -1,5 +1,6 @@
 """Run the agent (or the no-tools baseline) over the eval set, score it, write results/<name>.json."""
 import argparse
+import csv
 import hashlib
 import itertools
 import json
@@ -8,6 +9,7 @@ import os
 import random
 import statistics
 import subprocess
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -32,7 +34,7 @@ def run_case(row: dict, src: Path, mode: str, model: str, client, do_judge: bool
     gold = row.get("label_override") or row["gold_label"]
     case = {"number": row["number"], "created_at": row["created_at"], "gold": gold,
             "gold_dup": row.get("gold_duplicate_of"), "pred": None, "pred_dup": None, "confidence": 0.0,
-            "score": None, "wrong": None, "cost": 0.0, "judge_cost": 0.0, "latency_s": None, "steps": 0, "error": None}
+            "score": None, "wrong": None, "cost": 0.0, "judge_cost": 0.0, "latency_s": None, "steps": 0, "error": None, "reply": None}
     try:
         ctx = {"repo": row["repo"], "dir": checkout(src, row["sha"]),
                "number": row["number"], "created_at": row["created_at"]}
@@ -44,7 +46,7 @@ def run_case(row: dict, src: Path, mode: str, model: str, client, do_judge: bool
         else:
             rec = agent.run(issue, ctx, model, client=client)
         case.update(pred=rec["label"], pred_dup=rec["duplicate_of"], confidence=rec["confidence"], cost=rec["cost"],
-                    latency_s=rec["latency_s"], steps=rec["steps"], error=rec["error"],
+                    latency_s=rec["latency_s"], steps=rec["steps"], error=rec["error"], reply=rec["reply"],
                     route=rec.get("route"), capped=rec.get("capped"))
         if do_judge and rec["reply"]:
             j = judge(issue, row["maintainer_reply"], rec["reply"], client=client)
@@ -188,6 +190,49 @@ def gate(pa: str, pb: str) -> bool:
     return ok
 
 
+def kappa(a: list, b: list, weighted: bool = False) -> float:
+    """Cohen's kappa; weighted=True uses quadratic weights on numeric scores. 1 - observed/expected disagreement."""
+    w = (lambda x, y: (x - y) ** 2) if weighted else (lambda x, y: float(x != y))
+    obs = sum(map(w, a, b)) / len(a)
+    exp = sum(w(x, y) for x in a for y in b) / len(a) ** 2  # marginals independent
+    return 1 - obs / exp if exp else 1.0  # exp 0: both raters gave one identical value throughout
+
+
+GRADE_COLS = ["number", "title", "body", "maintainer_reply", "agent_reply", "human_score", "human_wrong"]
+
+
+def export_grading(results: str, dataset: str, n: int = 50, out=sys.stdout, seed: int = 0) -> None:
+    """Blind grading sheet: a seeded sample of replied cases, without the judge's score."""
+    rows = {r["number"]: r for r in load(dataset)}
+    pool = sorted((c for c in json.loads(Path(results).read_text())["cases"] if c.get("reply")), key=lambda c: c["number"])
+    w = csv.DictWriter(out, GRADE_COLS)
+    w.writeheader()
+    for c in sorted(random.Random(seed).sample(pool, min(n, len(pool))), key=lambda c: c["number"]):
+        r = rows[c["number"]]
+        w.writerow({"number": c["number"], "title": r["title"], "body": (r.get("body") or "")[:1500],
+                    "maintainer_reply": r["maintainer_reply"], "agent_reply": c["reply"], "human_score": "", "human_wrong": ""})
+
+
+def calibrate(grading: str, results: str) -> bool:
+    """Judge vs human agreement on the hand-graded sheet; True = weighted kappa >= 0.6."""
+    cases = {c["number"]: c for c in json.loads(Path(results).read_text())["cases"]}
+    with open(grading, newline="") as fh:
+        rows = [r for r in csv.DictReader(fh) if r["human_score"].strip()]
+    if not rows:
+        raise SystemExit("no human_score filled in")
+    h = [int(r["human_score"]) for r in rows]
+    j = [cases[int(r["number"])]["score"] for r in rows]
+    k = kappa(h, j, weighted=True)
+    print(f"n={len(h)}  exact={_mean(x == y for x, y in zip(h, j)):.3f}  "
+          f"within1={_mean(abs(x - y) <= 1 for x, y in zip(h, j)):.3f}  weighted_kappa={k:.3f}")
+    wr = [r for r in rows if r.get("human_wrong", "").strip()]
+    if wr:
+        hw = [r["human_wrong"].strip().lower() in ("1", "true", "yes", "y") for r in wr]
+        print(f"wrong_kappa={kappa(hw, [bool(cases[int(r['number'])]['wrong']) for r in wr]):.3f} (n={len(wr)})")
+    print(f"{'PASS' if k >= 0.6 else 'FAIL'} (weighted kappa >= 0.6)")
+    return k >= 0.6
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", default="agent", choices=["agent", "baseline", "routed"])
@@ -202,7 +247,14 @@ def main() -> None:
     ap.add_argument("--stratify", action="store_true", help="balance --limit across gold labels")
     ap.add_argument("--gate", nargs="+", metavar="FILE",
                     help="BASELINE [NEW]: gate NEW (or this run's results) against BASELINE; exit 1 on regression")
+    ap.add_argument("--export-grading", metavar="RESULTS", help="write a blind hand-grading CSV to stdout")
+    ap.add_argument("--n", type=int, default=50, help="--export-grading sample size")
+    ap.add_argument("--calibrate", nargs=2, metavar=("CSV", "RESULTS"), help="judge vs hand grades; exit 1 if kappa < 0.6")
     a = ap.parse_args()
+    if a.export_grading:
+        return export_grading(a.export_grading, a.dataset, a.n)
+    if a.calibrate:
+        raise SystemExit(0 if calibrate(*a.calibrate) else 1)
     if a.compare:
         return compare(*a.compare)
     if a.gate and len(a.gate) > 2:

@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import tempfile
 import unittest
@@ -185,6 +187,52 @@ class StratifyTest(unittest.TestCase):
         self.assertEqual(count("duplicate"), 3)  # a small class is taken whole
         self.assertEqual([count(l) for l in ("bug", "feature", "question")], [6, 6, 5])  # rest split evenly, label order breaks ties
         self.assertEqual(len({r["number"] for r in got}), 20)
+
+
+class CalibrationTest(unittest.TestCase):
+    def test_kappa(self):
+        self.assertEqual(run_eval.kappa([1, 2, 3, 4, 5], [1, 2, 3, 4, 5], weighted=True), 1.0)
+        self.assertEqual(run_eval.kappa([True, False], [True, False]), 1.0)
+        self.assertAlmostEqual(run_eval.kappa([1, 1, 0, 0], [1, 0, 0, 0]), 0.5)  # po .75, pe .5
+        self.assertAlmostEqual(run_eval.kappa([1, 2, 3], [1, 2, 2], weighted=True), 2 / 3)  # obs 1/3, exp 9/9
+
+    def test_export_round_trip(self):
+        rows = [{"number": i, "split": "dev", "title": f"t{i}", "body": "x" * 2000, "maintainer_reply": f"m{i}"}
+                for i in range(80)]
+        cases = [{**case(i, "bug", "bug", 0.9, 1 + i % 5, i % 2 == 0, 1.0), "reply": f"r{i}" if i < 70 else None}
+                 for i in range(80)]
+        with tempfile.TemporaryDirectory() as d:
+            ds, res, sheet = Path(d) / "ds.jsonl", Path(d) / "r.json", Path(d) / "g.csv"
+            ds.write_text("\n".join(map(json.dumps, rows)))
+            res.write_text(json.dumps({"cases": cases}))
+            outs = []
+            for _ in range(2):
+                buf = io.StringIO()
+                run_eval.export_grading(str(res), str(ds), 50, out=buf)
+                outs.append(buf.getvalue())
+            self.assertEqual(outs[0], outs[1])  # deterministic sample
+            got = list(csv.DictReader(io.StringIO(outs[0])))
+            self.assertEqual(len(got), 50)
+            self.assertTrue(all(int(r["number"]) < 70 and r["human_score"] == "" for r in got))  # replied cases only
+            self.assertEqual((len(got[0]["body"]), got[0]["agent_reply"]), (1500, f"r{got[0]['number']}"))
+            for r in got:  # human agrees with the judge exactly
+                c = cases[int(r["number"])]
+                r.update(human_score=c["score"], human_wrong="yes" if c["wrong"] else "no")
+            with sheet.open("w", newline="") as fh:
+                w = csv.DictWriter(fh, run_eval.GRADE_COLS)
+                w.writeheader()
+                w.writerows(got)
+            with mock.patch("builtins.print") as pr:
+                self.assertTrue(run_eval.calibrate(str(sheet), str(res)))
+            out = "\n".join(c.args[0] for c in pr.call_args_list)
+            self.assertIn("exact=1.000", out)
+            self.assertIn("weighted_kappa=1.000", out)
+            self.assertIn("wrong_kappa=1.000", out)
+            for c in cases:
+                c["score"] = 6 - c["score"]  # judge inverted -> kappa negative
+            res.write_text(json.dumps({"cases": cases}))
+            with mock.patch("builtins.print"):
+                self.assertFalse(run_eval.calibrate(str(sheet), str(res)))
 
 
 class JudgeTest(unittest.TestCase):
