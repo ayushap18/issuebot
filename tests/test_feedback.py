@@ -60,7 +60,7 @@ class FeedbackTest(unittest.TestCase):
         if existing:
             f.write_text("".join(json.dumps(r) + "\n" for r in existing))
         fake = FakeGH(issues, timelines, *([labels] if labels else []))
-        with fake_gh(fake):
+        with fake_gh(fake), mock.patch.dict("os.environ", {"GITHUB_TOKEN": "t"}):
             drift, row, self.outcomes = feedback.collect("o/r", 7, d, baseline, NOW)
         return drift, row, feedback.read_rows(f)
 
@@ -232,7 +232,9 @@ class FeedbackTest(unittest.TestCase):
         out = feedback.read_rows(ds)
         self.assertEqual([(r["number"], r["split"]) for r in out], [(1, "test"), (2, "dev"), (3, "dev"), (4, "test")])
         self.assertEqual(out[1]["sha"], "sha-2026-10-02")
-        self.assertEqual([r["number"] for r in feedback.read_rows(cand / "o__r.jsonl")], [5])
+        # unlabeled and refused (clashing) rows stay for a human; promoted and already-present rows are removed
+        self.assertEqual([(r["repo"], r["number"]) for r in feedback.read_rows(cand / "o__r.jsonl")],
+                         [("o/r", 5), ("x/y", 1)])
 
 
 if __name__ == "__main__":

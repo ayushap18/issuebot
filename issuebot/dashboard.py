@@ -21,6 +21,7 @@ def _f(x, fmt="{:.0%}") -> str:
 
 
 def rows(results: Path, status: dict) -> list[dict]:
+    status = {k.lower(): v for k, v in status.items()}  # results keep the input repo casing; status.json is lowercase
     def live(r):
         s = status.get(r)
         s = s if isinstance(s, dict) else {}
@@ -33,7 +34,7 @@ def rows(results: Path, status: dict) -> list[dict]:
             m = res["metrics"]
         except (ValueError, KeyError, TypeError):
             continue  # not a results file
-        repo = res.get("repo") or "-"  # run_eval results have no repo field
+        repo = (res.get("repo") or "-").lower()  # run_eval results have no repo field
         seen.add(repo)
         w = next(iter(worst(res.get("cases") or [], 1)), None)
         out.append({"repo": repo, "run": res.get("name", p.stem), "n": m.get("n"), "acc": m.get("label_accuracy"),

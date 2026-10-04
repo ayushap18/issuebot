@@ -2,6 +2,7 @@
 import argparse
 import itertools
 import json
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,13 +40,19 @@ def gold(issue: dict, comments: list[dict]) -> tuple[str, int | None] | None:
 
 
 def original_text(repo: str, i: dict, comments: list[dict]) -> tuple[str, str] | None:
-    """Title and body as opened. None when the body was edited after the first maintainer comment (answer may leak in)."""
+    """Title and body as opened. None when the body was edited after the first maintainer comment (answer may leak in)
+    or GraphQL can't tell us (errors, or no such issue)."""
+    if not os.environ.get("GITHUB_TOKEN"):
+        raise SystemExit("GITHUB_TOKEN is not set: the GitHub GraphQL API used to check issue edits requires auth")
     ev = gh(f"/repos/{repo}/issues/{i['number']}/events", params={"per_page": 100})
     title = next((e["rename"]["from"] for e in ev if e["event"] == "renamed"), i["title"])
     owner, name = repo.split("/")
     q = "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){lastEditedAt}}}"
     r = gh("/graphql", "POST", json={"query": q, "variables": {"o": owner, "r": name, "n": i["number"]}})
-    edited = r["data"]["repository"]["issue"]["lastEditedAt"]
+    issue = ((r.get("data") or {}).get("repository") or {}).get("issue")
+    if r.get("errors") or not issue:
+        return None
+    edited = issue["lastEditedAt"]
     first = next((c["created_at"] for c in comments if is_maint(c)), None)
     return None if edited and first and edited > first else (title, i["body"])
 

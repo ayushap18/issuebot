@@ -136,17 +136,17 @@ def promote(cand: Path, dataset: Path, min_n: int, force: bool) -> int:
     rows = [(f, r) for f in files for r in read_rows(f)]
     todo = [(f, r) for f, r in rows if not (r.get("label_override") or r.get("gold_label"))]
     num = {r["number"]: r["repo"] for r in read_rows(dataset)}
-    new, clash = [], 0
-    for r in sorted((r for f, r in rows if (f, r) not in todo), key=lambda r: r["created_at"]):
+    new, clash = [], []
+    for f, r in sorted(((f, r) for f, r in rows if (f, r) not in todo), key=lambda fr: fr[1]["created_at"]):
         if num.get(r["number"], r["repo"]) != r["repo"]:
-            clash += 1  # ponytail: gate/bootstrap key cases on number alone; key on (repo, number) to accept these
+            clash.append((f, r))  # kept in its candidate file; ponytail: gate/bootstrap key cases on number alone; key on (repo, number) to accept these
         elif r["number"] not in num:
             num[r["number"]] = r["repo"]
             new.append(r)
     if todo:
         print(f"{len(todo)} candidates need a hand label (label_override) before they can be promoted")
     if clash:
-        print(f"refused {clash} rows whose number is already in the dataset under another repo")
+        print(f"refused {len(clash)} rows whose number is already in the dataset under another repo")
     if len(new) < min_n and not force:
         print(f"{len(new)} new labeled candidates, need {min_n} (or --force)")
         return 0
@@ -156,12 +156,12 @@ def promote(cand: Path, dataset: Path, min_n: int, force: bool) -> int:
     dataset.parent.mkdir(parents=True, exist_ok=True)
     dataset.write_text("".join(json.dumps(r) + "\n" for r in read_rows(dataset) + new))
     for f in files:
-        keep = [r for g, r in todo if g == f]
+        keep = [r for g, r in todo + clash if g == f]
         if keep:
             f.write_text("".join(json.dumps(r) + "\n" for r in keep))
         else:
             f.unlink()
-    print(f"promoted {len(new)} rows into {dataset} ({len(rows) - len(todo) - len(new)} already present or refused). "
+    print(f"promoted {len(new)} rows into {dataset} ({len(rows) - len(todo) - len(clash) - len(new)} already present, {len(clash)} refused). "
           "Re-record eval/baseline.json: the CI gate's --stratify slice reshuffles when dev rows are added.")
     return len(new)
 

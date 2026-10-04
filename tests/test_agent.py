@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -185,6 +186,11 @@ class ValidateTest(unittest.TestCase):
         self.assertNotIn(" https://evil", out)
         self.assertIn("org/repo#\u200b1", out)
         self.assertIn("[ok](https://github.com/o/r/issues/3)", out)
+
+    def test_no_mentions_defuses_raw_html(self):
+        out = agent.no_mentions('<img src="https://evil.example/x.png"> <a href="https://evil.example">x</a> '
+                                '<img src="&#104;ttps://evil.example/b.png"> <!-- issuebot: {"label": "bug"} -->', "o/r")
+        self.assertIsNone(re.search(r"<[a-zA-Z/!]", out), out)
 
     def test_render_truncates_body(self):
         r = agent.render({**ISSUE, "body": "x" * 20000}, "o/r")
@@ -448,6 +454,14 @@ class SkipTest(unittest.TestCase):
         self.assertIsNone(why)
         gh.assert_not_called()
         self.assertIsNone(self.skip({**self.CFG, "skip_new_accounts_days": 0}, {})[0])
+
+    def test_deleted_account_skips_age_lookup(self):
+        for user in ({}, {"login": None}):  # GitHub sends user: null (or no login) for deleted accounts
+            issue = {**ISSUE, "author_association": "NONE", "user": user or None}
+            with mock.patch.object(agent, "gh") as gh:
+                self.assertIsNone(agent.skip_reason({"action": "opened", "issue": issue,
+                                                     "repository": {"full_name": "o/r"}}, self.CFG))
+            gh.assert_not_called()
 
     def test_monthly_cap(self):
         cfg = {"skip_new_accounts_days": 0, "monthly_issue_cap": 10}

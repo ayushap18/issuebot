@@ -52,6 +52,11 @@ class DashboardTest(unittest.TestCase):
         self.assertLess(html.index("odd/repo"), html.index("ok/repo"))
         self.assertIn("bad/entry", html)
 
+    def test_repo_casing_matches_status(self):
+        html = self.build([res("Bad/Repo", 0.6)], {"bad/repo": {"kept_rate": 0.7, "n": 30, "status": "shadow"}})
+        self.assertEqual(html.lower().count("<td>bad/repo</td>"), 1)  # one row, not a results row plus a status-only row
+        self.assertIn("<td>70% (30)</td>", html)
+
     def test_escapes_html(self):
         html = self.build([res("<script>alert(1)</script>/r", 0.5, title='<img src=x onerror="a()">')])
         self.assertNotIn("<script>alert", html)
