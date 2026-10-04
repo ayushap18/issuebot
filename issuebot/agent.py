@@ -68,6 +68,9 @@ CONFIG = {
     "per_issue_cap_usd": (CEILING, lambda v: type(v) in (int, float) and v > 0, "a number > 0"),
     "monthly_issue_cap": (0, lambda v: type(v) is int and v >= 0, "an integer >= 0 (0 = unlimited)"),
     "skip_new_accounts_days": (7, lambda v: type(v) is int and v >= 0, "an integer >= 0 (0 = off)"),
+    # ponytail: the Action has no cached corpus, so local/fts are eval/backtest only (--search) until an A/B wins
+    "search": ("github", lambda v: v == "github",
+               '"github" (local and fts need a cached corpus: use --search in run_eval / backtest)'),
 }
 
 
@@ -282,6 +285,12 @@ def trace(record: dict, dir: str = "runs") -> None:
         f.write(json.dumps(record, default=str) + "\n")
 
 
+def hits(text: str, k: int = 5) -> list[int]:
+    """Top-k issue numbers in a search_issues result, for dup recall@5."""
+    # ponytail: parses the rendered lines; a body snippet line shaped like "#12 (2020-01-01) ..." would count too
+    return [int(m) for m in re.findall(r"^#(\d+) \(\d{4}-\d\d-\d\d\) ", text, re.M)][:k]
+
+
 def run(issue: dict, ctx: dict, model: str = REPLY_MODEL, tools: list | None = None,
         max_steps: int = MAX_STEPS, client=None, runs_dir: str | None = "runs", ceiling: float = CEILING) -> dict:
     client = client or make_client()
@@ -322,7 +331,8 @@ def run(issue: dict, ctx: dict, model: str = REPLY_MODEL, tools: list | None = N
             t = time.monotonic()
             text, err = call(b.name, b.input, ctx)
             calls.append({"name": b.name, "input": b.input, "chars": len(text),
-                          "ms": round((time.monotonic() - t) * 1000), "error": err})
+                          "ms": round((time.monotonic() - t) * 1000), "error": err,
+                          **({"hits": hits(text)} if b.name == "search_issues" and not err else {})})
             results.append({"type": "tool_result", "tool_use_id": b.id, "content": text, "is_error": err})
         msgs.append({"role": "user", "content": results})
     rec = {**(out or {"label": None, "duplicate_of": None, "reply": "", "confidence": 0.0}),
@@ -390,7 +400,8 @@ def main() -> None:
         print(json.dumps({"skipped": why}))
         return
     n, mode, min_conf = issue["number"], cfg["mode"], cfg["min_confidence"]
-    ctx = {"repo": repo, "dir": d, "number": n, "created_at": issue["created_at"], "docs": cfg["docs"]}
+    ctx = {"repo": repo, "dir": d, "number": n, "created_at": issue["created_at"], "docs": cfg["docs"],
+           "search": cfg["search"]}
     ceiling = cfg["per_issue_cap_usd"]
     if os.environ.get("ISSUEBOT_DRY_RUN") == "1":  # offline smoke test: guards + config + prompt, no model/write calls
         print(json.dumps({"dry_run": True, "repo": repo, "issue": n, "config": cfg,

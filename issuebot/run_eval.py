@@ -13,7 +13,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from issuebot import agent
+from issuebot import agent, tools
 from issuebot.judge import CAUSES, JUDGE_MODEL, judge, judge_backend, tag_failure
 from issuebot.tools import LABELS, SUBMIT, checkout, clone
 
@@ -32,7 +32,7 @@ def load(path: str, split: str = "all", limit: int | None = None, stratify: bool
 
 
 def run_case(row: dict, src: Path, mode: str, model: str, client, do_judge: bool = True,
-             threshold: float = agent.ROUTE_THRESHOLD, corpus: list | None = None,
+             threshold: float = agent.ROUTE_THRESHOLD, search: dict | None = None,
              judge_client=None, judge2_client=None) -> dict:
     gold = row.get("label_override") or row["gold_label"]
     case = {"number": row["number"], "created_at": row["created_at"], "gold": gold,
@@ -40,7 +40,7 @@ def run_case(row: dict, src: Path, mode: str, model: str, client, do_judge: bool
             "score": None, "wrong": None, "cost": 0.0, "judge_cost": 0.0, "latency_s": None, "steps": 0, "error": None, "reply": None}
     try:
         ctx = {"repo": row["repo"], "dir": checkout(src, row["sha"]),
-               "number": row["number"], "created_at": row["created_at"], "corpus": corpus}
+               "number": row["number"], "created_at": row["created_at"], **(search or {})}
         issue = {k: row[k] for k in ("number", "title", "body", "created_at")}  # the agent sees nothing else
         if mode == "baseline":  # same prompt and output, no retrieval tools: a clean ablation on one code path
             rec = agent.run(issue, ctx, model, tools=[SUBMIT], max_steps=2, client=client)
@@ -51,7 +51,7 @@ def run_case(row: dict, src: Path, mode: str, model: str, client, do_judge: bool
         case.update(pred=rec["label"], pred_dup=rec["duplicate_of"], confidence=rec["confidence"], cost=rec["cost"],
                     latency_s=rec["latency_s"], steps=rec["steps"], error=rec["error"], reply=rec["reply"],
                     route=rec.get("route"), capped=rec.get("capped"), backend=rec.get("backend"),
-                    tool_calls=[{"name": t["name"], "input": t["input"]} for t in rec.get("tool_calls", [])])
+                    tool_calls=[{k: t[k] for k in ("name", "input", "hits") if k in t} for t in rec.get("tool_calls", [])])
         if do_judge and rec["reply"]:
             j = judge(issue, row["maintainer_reply"], rec["reply"], client=judge_client or client)
             case.update(score=j["score"], wrong=j["wrong"], judge_cost=j["cost"], judge_reason=j["reason"])
@@ -67,6 +67,17 @@ def run_case(row: dict, src: Path, mode: str, model: str, client, do_judge: bool
     if do_judge and case["score"] is None and not case["reply"]:  # no reply scores 1, so a flakier system isn't judged on an easier subset; judge errors stay None
         case.update(score=1, wrong=False)
     return case
+
+
+def retriever(repo: str, search: str, issues: list | None = None) -> dict:
+    """ctx keys for search_issues. local/fts read the cached corpus (REST list pages; reruns fetch only updates)."""
+    if search == "github":
+        return {"search": "github"}
+    if issues is None:
+        from issuebot.backtest import corpus  # backtest imports this module
+        issues = corpus(repo)
+    fts = tools.index(repo, issues) if search == "fts" else None
+    return {"search": "fts" if fts else "local", "corpus": issues, "fts": fts}  # no FTS5: local, recorded as such
 
 
 def pct(xs: list[float], q: float) -> float:
@@ -85,6 +96,11 @@ def _div(a, b) -> float:
 
 def dup_hit(c: dict) -> bool:
     return c["pred"] == "duplicate" and c["pred_dup"] is not None and c["pred_dup"] == c["gold_dup"]
+
+
+def dup_seen(c: dict) -> bool:
+    """Retrieval-only: the gold duplicate was in the top 5 of any search the agent ran (needs `hits` in tool_calls)."""
+    return any(c["gold_dup"] in t.get("hits", ()) for t in c.get("tool_calls") or ())
 
 
 def metrics(cases: list[dict]) -> dict:
@@ -116,6 +132,8 @@ def metrics(cases: list[dict]) -> dict:
         "confusion": {a: {b: sum(x == a and y == b for x, y in zip(g, p)) for b in (*LABELS, None)} for a in LABELS},
         "dup_precision": _div(sum(map(dup_hit, cases)), p.count("duplicate")),
         "dup_recall": _div(sum(map(dup_hit, cases)), g.count("duplicate")),
+        "dup_recall_at5": _div(sum(map(dup_seen, dups := [c for c in cases if c["gold"] == "duplicate" and c["gold_dup"]])),
+                               len(dups)),
         "judged": len(judged),
         "judge_mean": _mean(c["score"] for c in judged),
         "judge_ge4": _mean(c["score"] >= 4 for c in judged),
@@ -154,6 +172,7 @@ COMPARE = {
     "label_accuracy": lambda c: float(c["pred"] == c["gold"]),
     "judge_mean": lambda c: c["score"],
     "dup_recall": lambda c: float(dup_hit(c)) if c["gold"] == "duplicate" else None,
+    "dup_recall_at5": lambda c: float(dup_seen(c)) if c["gold"] == "duplicate" and c["gold_dup"] else None,
     "confidently_wrong": lambda c: None if c["wrong"] is None else float(c["wrong"] and c["confidence"] >= 0.7),
     "cost": lambda c: c["cost"] + c["judge_cost"],
 }
@@ -304,6 +323,8 @@ def main() -> None:
     ap.add_argument("--dataset", default="eval/dataset.jsonl")
     ap.add_argument("--compare", nargs=2, metavar=("A", "B"))
     ap.add_argument("--stratify", action="store_true", help="balance --limit across gold labels")
+    ap.add_argument("--search", default="github", choices=tools.SEARCH,
+                    help="search_issues backend; local/fts fetch and cache each repo's issue corpus first")
     ap.add_argument("--gate", nargs="+", metavar="FILE",
                     help="BASELINE [NEW]: gate NEW (or this run's results) against BASELINE; exit 1 on regression")
     ap.add_argument("--export-grading", metavar="RESULTS", help="write a blind hand-grading CSV to stdout")
@@ -333,10 +354,11 @@ def main() -> None:
     client, jb = agent.make_client(), judge_backend()
     jclient, j2client = agent.make_client(jb), a.judge2 and agent.make_client(a.judge2)
     srcs = {r: clone(r) for r in {row["repo"] for row in rows}}  # fetch once, not per case
+    search = {r: retriever(r, a.search) for r in srcs}
     cases = []
     for row in rows:
         c = run_case(row, srcs[row["repo"]], a.mode, a.model, client, not a.no_judge, a.threshold,
-                     judge_client=jclient, judge2_client=j2client)
+                     search=search[row["repo"]], judge_client=jclient, judge2_client=j2client)
         cases.append(c)
         print(f"#{c['number']} {c['gold']}->{c['pred']} dup={c['pred_dup'] or '-'} score={c['score'] or '-'} "
               f"${c['cost'] + c['judge_cost']:.3f} {c['latency_s'] or 0:.1f}s{' ERR ' + c['error'] if c['error'] else ''}",
@@ -350,7 +372,8 @@ def main() -> None:
         commit = None
     out = {"name": name, "mode": a.mode, "model": a.model, "judge_model": None if a.no_judge else JUDGE_MODEL,
            "backend": getattr(client, "backend", "api"), "judge_backend": None if a.no_judge else jb, "judge2_backend": a.judge2,
-           "split": a.split, "n": len(cases), "issuebot_commit": commit,
+           "split": a.split, "search": "local" if a.search == "fts" and not tools.fts5() else a.search,  # effective
+           "n": len(cases), "issuebot_commit": commit,
            "dataset_sha256": hashlib.sha256(Path(a.dataset).read_bytes()).hexdigest(), "metrics": m, "cases": cases}
     Path("results").mkdir(exist_ok=True)
     Path(f"results/{name}.json").write_text(json.dumps(out, indent=1))

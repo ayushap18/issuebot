@@ -120,6 +120,7 @@ class LocalSearchTest(unittest.TestCase):
 class MainTest(unittest.TestCase):
     def test_n_clamped_and_no_commit_field(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(backtest, "corpus", return_value=[]), \
+                mock.patch.object(tools, "index", return_value=None), \
                 mock.patch.object(backtest.build_eval, "build", return_value=[]) as build, \
                 mock.patch.object(backtest.agent, "make_client"), mock.patch.object(backtest, "clone"), \
                 mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": ""}), mock.patch("builtins.print"):

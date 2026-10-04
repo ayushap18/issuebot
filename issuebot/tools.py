@@ -1,7 +1,11 @@
 """GitHub REST helper, repo checkout at a point in time, and the agent's read-only tools."""
 import os
+import re
+import sqlite3
 import subprocess
+import sys
 import time
+from contextlib import closing
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -154,23 +158,80 @@ def _search(repo: str, created_at: str, query: str, n: int) -> tuple:
     return tuple(map(_hit, items))
 
 
+def _terms(query: str) -> list[str]:
+    # The model writes `query`: drop GitHub qualifiers, boolean operators and -exclusions.
+    return [t for t in query.replace('"', " ").split()
+            if ":" not in t and t not in ("OR", "AND", "NOT") and not t.startswith("-")]
+
+
 def _local(corpus: list[dict], created_at: str, number: int, query: str, n: int) -> list[tuple]:
-    # ponytail: every-term substring match, newest first, not GitHub's ranking; SQLite FTS5 is the Stage 3 upgrade.
-    terms = [t.lower() for t in query.replace('"', " ").split()  # qualifiers, operators and exclusions dropped
-             if ":" not in t and t not in ("OR", "AND", "NOT") and not t.startswith("-")]
+    # ponytail: every-term substring match, newest first, not GitHub's ranking; search="fts" is the ranked upgrade.
+    terms = [t.lower() for t in _terms(query)]
     hits = [i for i in corpus if i["created_at"] < created_at and i["number"] != number
             and all(t in f"{i['title']}\n{i.get('body') or ''}".lower() for t in terms)]
     hits.sort(key=lambda i: i["created_at"], reverse=True)
     return [_hit(i) for i in hits[:n]]
 
 
+def fts5() -> bool:
+    try:
+        with closing(sqlite3.connect(":memory:")) as db:
+            db.execute("CREATE VIRTUAL TABLE t USING fts5(x)")
+        return True
+    except sqlite3.OperationalError:
+        return False
+
+
+def index(repo: str, corpus: list[dict], cache: Path = Path("cache")) -> Path | None:
+    """Build/update the FTS5 index of the cached corpus (rowid = issue number). None = this sqlite has no FTS5."""
+    if not fts5():
+        print("warning: sqlite3 has no FTS5; search falls back to local", file=sys.stderr)
+        return None
+    f = cache / f"fts-{repo.replace('/', '__')}.sqlite"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(f)) as db, db:  # closing() closes, `db` commits
+        db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS issues USING fts5("
+                   "title, body, created_at UNINDEXED, tokenize='porter unicode61')")
+        have = {r[0]: r[1:] for r in db.execute("SELECT rowid, title, body, created_at FROM issues")}
+        rows = [(i["number"], i["title"], i.get("body") or "", i["created_at"]) for i in corpus]
+        rows = [r for r in rows if have.get(r[0]) != r[1:]]  # incremental: only new or edited issues
+        db.executemany("DELETE FROM issues WHERE rowid = ?", [r[:1] for r in rows])  # FTS5 has no UPSERT
+        db.executemany("INSERT INTO issues(rowid, title, body, created_at) VALUES (?, ?, ?, ?)", rows)
+    return f
+
+
+def match(query: str) -> str:
+    """Untrusted query -> FTS5 MATCH: each word token double-quoted (always a plain string, never syntax), ORed."""
+    words = dict.fromkeys(w.lower() for t in _terms(query) for w in re.findall(r"\w+", t))
+    return " OR ".join(f'"{w}"' for w in list(words)[:32])  # ponytail: 32-term cap, longer queries lose the tail
+
+
+def _fts(db: Path, created_at: str, number: int, query: str, n: int) -> list[tuple]:
+    if not (q := match(query)):
+        return []
+    with closing(sqlite3.connect(db)) as c:
+        rows = c.execute("SELECT rowid, created_at, title, body FROM issues WHERE issues MATCH ? "
+                         "AND created_at < ? AND rowid != ? ORDER BY bm25(issues) LIMIT ?",
+                         (q, created_at, number, n)).fetchall()
+    return [_hit(dict(zip(("number", "created_at", "title", "body"), r))) for r in rows]
+
+
+SEARCH = ("github", "local", "fts")
+
+
 def search_issues(ctx, query: str, max_results: int = 10) -> str:
     n = max(1, min(max_results or 10, 20))
-    # ctx["corpus"] (backtest's cached issue list) answers locally; only a local miss costs a search API call.
-    local = _local(ctx["corpus"], ctx["created_at"], ctx["number"], query, n) if ctx.get("corpus") else []
+    # ctx["search"]: github = search API; local = cached corpus, search API only on a miss; fts = ctx["fts"] index,
+    # never the API. Unset: local when a corpus is passed, else github. fts without an index (no FTS5) runs as local.
+    mode = ctx.get("search") or ("local" if ctx.get("corpus") else "github")
+    if mode == "fts" and ctx.get("fts"):
+        hits = _fts(ctx["fts"], ctx["created_at"], ctx["number"], query, n)
+    else:
+        local = (_local(ctx["corpus"], ctx["created_at"], ctx["number"], query, n)
+                 if mode != "github" and ctx.get("corpus") else [])
+        hits = local or _search(ctx["repo"], ctx["created_at"], query, n + 1)
     # Recheck locally: the model writes `query` and qualifiers in it (created:>..., repo:...) can widen the filter.
-    hits = [h for h in local or _search(ctx["repo"], ctx["created_at"], query, n + 1)
-            if h[0] != ctx["number"] and h[1] < ctx["created_at"]][:n]
+    hits = [h for h in hits if h[0] != ctx["number"] and h[1] < ctx["created_at"]][:n]
     return "\n".join(f"#{num} ({d[:10]}) {t}\n  {b}" for num, d, t, b in hits) or "no results"
 
 
