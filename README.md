@@ -93,7 +93,15 @@ Known remaining leakage: earlier issues' bodies may have been edited after the f
 | `cost_per_issue` | agent + judge $, from token usage incl. cache reads/writes |
 | latency p50 / p95, `avg_steps`, `error_rate` | per case |
 
-The judge (`issuebot/judge.py`, Haiku 4.5, JSON-schema structured output) grades substance, not tone, and never sees which system produced the reply. It will be calibrated against 50 hand grades (Cohen's kappa) before its numbers are quoted.
+The judge (`issuebot/judge.py`, Haiku 4.5, JSON-schema structured output) grades substance, not tone, and never sees which system produced the reply. Its numbers are not quoted until it is calibrated against 50 hand grades:
+
+```bash
+python -m issuebot.run_eval --export-grading results/A.json > grading.csv   # --n 50, seeded, judge score hidden
+# fill in human_score (1-5) and optionally human_wrong (yes/no) for each row
+python -m issuebot.run_eval --calibrate grading.csv results/A.json
+```
+
+`--calibrate` prints exact and within-1 agreement, quadratic-weighted Cohen's kappa (plus kappa on `wrong` if graded), and exits 1 if weighted kappa < 0.6.
 
 `--compare A B` pairs two result files by issue number and prints deltas with a 95% paired-bootstrap CI. A change counts as an improvement only if the CI excludes 0.
 
@@ -147,11 +155,13 @@ python -m issuebot.run_eval --mode agent    --split dev --limit 40
 python -m issuebot.run_eval --mode agent    --split dev --limit 40 --model claude-haiku-4-5
 python -m issuebot.run_eval --mode routed   --split dev --limit 40 --threshold 0.8
 python -m issuebot.run_eval --compare results/A.json results/B.json
+python -m issuebot.run_eval --tag-failures results/A.json
+python -m issuebot.run_eval --split dev --limit 40 --stratify --gate eval/baseline.json
 ```
 
 Routed mode runs Haiku triage first and only runs the Sonnet agent when Haiku's confidence is below `--threshold` or the label is `bug`/`question`; the trace records `route`, `triage_cost` and `draft_cost`. Every run stops tool-looping at $0.15 (`CEILING`), takes one submit-only step, and records `capped: true`.
 
-Other flags: `--name NAME`, `--stratify`, `--gate BASELINE [NEW]`, `--no-judge`, `--dataset PATH`, `--split dev|test|all`.
+Other flags: `--name NAME`, `--stratify`, `--gate BASELINE [NEW]`, `--export-grading RESULTS [--n 50]`, `--calibrate CSV RESULTS`, `--tag-failures RESULTS`, `--no-judge`, `--dataset PATH`, `--split dev|test|all`. See [Metrics](#metrics) for what each does.
 
 Replay cache: `ISSUEBOT_REPLAY=record` stores every model call (agent and judge) under `cache/replay/` (override with `ISSUEBOT_REPLAY_DIR`), keyed on the sha256 of the full request. `ISSUEBOT_REPLAY=replay` serves only from the cache and fails on a miss, so unchanged cases cost $0 and need no API key.
 
@@ -159,6 +169,7 @@ Triage a single live issue (prints the JSON result, posts nothing):
 
 ```bash
 python -m issuebot.agent --repo vitest-dev/vitest --issue 1234
+python -m issuebot.agent --repo vitest-dev/vitest --issue 1234 --routed --threshold 0.8
 ```
 
 Run the offline tests (no network, no API key needed):
@@ -215,19 +226,29 @@ issuebot/
   agent.py        model ids + prices, system prompt, agent loop, trace(), CLI and Action entrypoint
   tools.py        GitHub REST helper, clone / sha_at / checkout, the 4 tools + submit schema
   build_eval.py   closed issues -> eval/dataset.jsonl (gold labels, SHA at issue time)
-  run_eval.py     run agent or baseline, score, write results/<name>.json, --compare
-  judge.py        LLM-as-judge vs the maintainer's reply
+  run_eval.py     run agent/baseline/routed, score, write results/<name>.json, --compare, --gate,
+                  --export-grading / --calibrate, --tag-failures
+  judge.py        LLM-as-judge vs the maintainer's reply, failure-cause tagger
 tests/            offline unittest suite (fake Anthropic client, httpx.MockTransport, temp git repos)
-eval/             dataset.jsonl
+eval/             dataset.jsonl, baseline.json + replay/ for the CI gate (not committed yet)
 results/          committed result files
 runs/             per-run JSONL traces (gitignored)
 examples/         example workflow for adopters
+.github/workflows test.yml (offline tests), eval-gate.yml (regression gate on PRs)
 action.yml        composite GitHub Action
 PLAN.md           build plan and design decisions
 SCALING.md        what changes when this runs on many repos
 ```
 
 ## Roadmap
+
+**Stage 0 tooling (built, see SCALING.md)**
+- [x] Record/replay cache for every model call (`ISSUEBOT_REPLAY`)
+- [x] Per-issue $0.15 ceiling and Haiku-first routed mode
+- [x] CI regression gate on a 40-case stratified slice (`--gate`, `eval-gate.yml`)
+- [x] Judge calibration tooling (`--export-grading`, `--calibrate`)
+- [x] Failure tagging for the Stage 3 trigger (`--tag-failures`)
+- [ ] Commit `eval/baseline.json` + `eval/replay/` so the gate runs instead of skipping
 
 **Week 1: dataset + baseline**
 - [ ] Pull 300 rows into `eval/dataset.jsonl` and commit it

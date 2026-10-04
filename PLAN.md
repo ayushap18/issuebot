@@ -541,4 +541,12 @@ packages = ["issuebot"]
 - Blog post, "Evaluating an issue-triage agent without leaking the future": checkout-at-SHA, search cutoff, judge calibration, baseline vs agent, cost/latency, what didn't work.
 - Exit: README with the results table, architecture diagram, how to reproduce (`build_eval` → `run_eval`), the published post, and the pitch link.
 
-Skipped in v1: vector search, Batch API, disk caches, parallel eval workers, and the Haiku→Sonnet confidence gate. SCALING.md lists the trigger for each.
+**Built ahead of the roadmap (SCALING.md Stage 0)**
+- [x] Disk record/replay cache for model calls (`ISSUEBOT_REPLAY=record|replay`, `ISSUEBOT_REPLAY_DIR`)
+- [x] Haiku→Sonnet confidence gate (`--mode routed`, `--threshold`) and the $0.15 per-issue ceiling
+- [x] CI regression gate: `--gate`, `--stratify`, `.github/workflows/eval-gate.yml`
+- [x] Judge calibration tooling: `--export-grading`, `--calibrate` (weighted kappa >= 0.6)
+- [x] Failure tagging: `--tag-failures` (Stage 3 trigger at >= 30% retrieval misses)
+- [ ] Every week 1-4 exit above: none has run yet, so no result files or numbers exist
+
+Skipped in v1: vector search, Batch API and parallel eval workers. SCALING.md lists the trigger for each.
