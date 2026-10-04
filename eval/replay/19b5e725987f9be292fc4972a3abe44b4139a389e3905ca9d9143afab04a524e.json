@@ -1,0 +1,1 @@
+{"content": [{"type": "tool_use", "id": "cli_3_0", "name": "read_file", "input": {"path": "packages/browser/src/client/public/error-catcher.js", "start_line": 1, "end_line": 80}}], "stop_reason": "tool_use", "usage": {"input_tokens": 4, "output_tokens": 230, "cache_read_input_tokens": 9729, "cache_creation_input_tokens": 5881}, "_cost": 0.0277778, "model": "claude-sonnet-5-5"}
