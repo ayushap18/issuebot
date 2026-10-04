@@ -150,7 +150,10 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual((j["score"], j["usage"]["output"], j["cost"]), (4, 5, 0.0))
         self.assertEqual(fake.arg("--model"), "gem")
         self.assertTrue(fake.arg("-p").startswith(judge.RUBRIC))  # no system flag: prepended
-        with patched(FakeCLI({"status": "ERROR", "response": "x"})), self.assertRaisesRegex(RuntimeError, "agy status"):
+        sent = json.loads(fake.arg("--json-schema"))["properties"]
+        self.assertNotIn("enum", sent["score"])  # Gemini rejects integer enums
+        with patched(FakeCLI({"status": "ERROR", "error": "INVALID_ARGUMENT"})), \
+                self.assertRaisesRegex(RuntimeError, "agy status ERROR: INVALID_ARGUMENT"):
             judge.judge(self.ISSUE, "m", "d", client=cli.CLIClient("agy"))
 
     def test_codex_judge_reads_output_file(self):

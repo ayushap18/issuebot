@@ -112,7 +112,7 @@ class CLIClient:
                     (Path(d) / "schema.json").write_text(json.dumps(schema))
                     cmd[-1:-1] = ["--output-schema", str(Path(d) / "schema.json")]
             if schema and self.kind != "codex":
-                cmd += ["--json-schema", json.dumps(schema)]
+                cmd += ["--json-schema", json.dumps(_no_int_enums(schema) if self.kind == "agy" else schema)]
             try:
                 p = subprocess.run(cmd, cwd=d, env=env, capture_output=True, text=True, timeout=timeout)
             except subprocess.TimeoutExpired:
@@ -132,12 +132,20 @@ class CLIClient:
                 _usage(s("inputTokens"), s("outputTokens"), s("cacheReadInputTokens"), s("cacheCreationInputTokens")), \
                 r.get("total_cost_usd")
         if r.get("status") != "SUCCESS":
-            raise RuntimeError(f"agy status {r.get('status')}: {str(r.get('response'))[:500]}")
+            raise RuntimeError(f"agy status {r.get('status')}: {str(r.get('error') or r.get('response'))[:500]}")
         u = r.get("usage") or {}
         # ponytail: agy reports no price, so $ is 0 (not a fake Haiku-priced number); add a Gemini price table if needed
         return (r.get("structured_output") if schema else r.get("response")), \
             _usage(u.get("input_tokens") or 0, (u.get("output_tokens") or 0) + (u.get("thinking_tokens") or 0),
                    u.get("cache_read_tokens") or 0), 0.0
+
+
+def _no_int_enums(s):
+    """Gemini 400s on non-string enums (judge score 1-5); drop them, callers validate the value anyway."""
+    if isinstance(s, dict):
+        return {k: _no_int_enums(v) for k, v in s.items()
+                if not (k == "enum" and any(not isinstance(x, str) for x in v))}
+    return [_no_int_enums(x) for x in s] if isinstance(s, list) else s
 
 
 def _usage(i=0, o=0, cr=0, cw=0):
