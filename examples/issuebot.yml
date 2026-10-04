@@ -6,6 +6,9 @@ on:
 permissions:
   contents: read
   issues: write   # only used in label/comment modes
+concurrency:      # a spam burst queues instead of fanning out
+  group: issuebot-${{ github.repository }}
+  cancel-in-progress: false
 jobs:
   triage:
     runs-on: ubuntu-latest
@@ -14,7 +17,7 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
-      - uses: <owner>/issuebot@v1
+      - uses: ayushap18/issuebot@v1
         with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           # settings live in .github/issuebot.toml (see examples/issuebot.toml); inputs set here override it

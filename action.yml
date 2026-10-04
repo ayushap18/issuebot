@@ -1,11 +1,14 @@
 name: issuebot
-description: Triage new issues and draft replies. Shadow mode by default (posts nothing).
+description: Triage new issues and draft replies with your own Anthropic key. Shadow mode by default (posts nothing).
+# Job needs permissions: { issues: write, contents: read } and an actions/checkout step (persist-credentials: false).
+# ISSUEBOT_DRY_RUN=1 in the step env runs guards + config + prompt only (no model or write calls);
+# ISSUEBOT_EVENT overrides the event payload path (used by this repo's smoke test).
 inputs:
   anthropic-api-key:
     required: true
   github-token:
     default: ${{ github.token }}
-  config:
+  config-path:
     default: ""
     description: "Repo config TOML, relative to the checkout. Default .github/issuebot.toml (optional file)"
   mode:
@@ -39,7 +42,7 @@ runs:
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
-        ISSUEBOT_CONFIG: ${{ inputs.config }}
+        ISSUEBOT_CONFIG: ${{ inputs.config-path }}
         ISSUEBOT_MODE: ${{ inputs.mode }}
         ISSUEBOT_MODEL: ${{ inputs.model }}
         ISSUEBOT_MIN_CONFIDENCE: ${{ inputs.min-confidence }}
@@ -47,4 +50,4 @@ runs:
         ISSUEBOT_MAX_STEPS: ${{ inputs.max-steps }}
         ISSUEBOT_ROUTED: ${{ inputs.routed }}
         ISSUEBOT_THRESHOLD: ${{ inputs.threshold }}
-      run: python -m issuebot.agent --event "$GITHUB_EVENT_PATH" --repo-dir "$GITHUB_WORKSPACE"
+      run: python -m issuebot.agent --event "${ISSUEBOT_EVENT:-$GITHUB_EVENT_PATH}" --repo-dir "$GITHUB_WORKSPACE"

@@ -182,7 +182,7 @@ python -m unittest discover -s tests -v
 
 issuebot runs on `issues.opened` as a composite action. The default mode is **shadow**: it writes the predicted label, confidence, cost and draft reply to the job summary and touches nothing on the issue.
 
-Copy `examples/issuebot.yml` to `.github/workflows/issuebot.yml` in your repo and add an `ANTHROPIC_API_KEY` secret:
+It is bring-your-own-key: copy `examples/issuebot.yml` to `.github/workflows/issuebot.yml` in your repo and add an `ANTHROPIC_API_KEY` secret. The job needs exactly `permissions: { issues: write, contents: read }` and a checkout with `persist-credentials: false`:
 
 ```yaml
 on:
@@ -191,6 +191,9 @@ on:
 permissions:
   contents: read
   issues: write   # only used in label/comment modes
+concurrency:
+  group: issuebot-${{ github.repository }}
+  cancel-in-progress: false
 jobs:
   triage:
     runs-on: ubuntu-latest
@@ -208,7 +211,7 @@ jobs:
 |---|---|---|
 | `anthropic-api-key` | required | |
 | `github-token` | `${{ github.token }}` | |
-| `config` | `.github/issuebot.toml` | repo config path (see below) |
+| `config-path` | `.github/issuebot.toml` | repo config path, relative to the checkout (see below) |
 | `mode` | config / `shadow` | blank inputs below fall back to the repo config, then its default |
 | `model` | `claude-sonnet-5-5` | |
 | `min-confidence` | config / `0.8` | |
@@ -219,7 +222,7 @@ jobs:
 
 ### Repo config
 
-Optionally copy `examples/issuebot.toml` to `.github/issuebot.toml` (read with stdlib `tomllib` from the checkout; another path via the `config` input / `ISSUEBOT_CONFIG`, which must then exist). Every key is optional and validated strictly: an unknown key or a wrong type fails the run with a message naming each bad key. Precedence: an action input / `ISSUEBOT_*` env var that is set (non-blank) > the file > the default.
+Optionally copy `examples/issuebot.toml` to `.github/issuebot.toml` (read with stdlib `tomllib` from the checkout; another path via the `config-path` input / `ISSUEBOT_CONFIG`, which must then exist). Every key is optional and validated strictly: an unknown key or a wrong type fails the run with a message naming each bad key. Precedence: an action input / `ISSUEBOT_*` env var that is set (non-blank) > the file > the default.
 
 | Key | Default | Notes |
 |---|---|---|
@@ -232,11 +235,19 @@ Optionally copy `examples/issuebot.toml` to `.github/issuebot.toml` (read with s
 | `docs` | `["docs"]` | doc dirs `list_docs` may list (its allowlist) |
 | `per_issue_cap_usd` | `0.15` | per-issue $ ceiling (`CEILING`) |
 | `monthly_issue_cap` | `0` | skip once more than this many issues were opened this month (one search call; 0 = unlimited). Also set an Anthropic workspace spend limit: that is the hard money cap |
-| `skip_new_accounts_days` | `7` | skip authors with `author_association` NONE whose account is younger than this (0 = off) |
+| `skip_new_accounts_days` | `7` | skip authors with `author_association` NONE / FIRST_TIME_CONTRIBUTOR / FIRST_TIMER whose account is younger than this (one `GET /users/{login}`; 0 = off) |
 
-Skipped issues cost no model call and get a one-line job summary.
+### Guards and output
 
-Posted comments carry a footer saying they are an automated triage draft. The action only reads the repo, and only triggers on `issues.opened` (never `pull_request_target`).
+Free guards run before any model call. The run exits 0 with a one-line job summary when the event is not `issues.opened`, the issue is a pull request, the author is a bot (`type: Bot` or `[bot]` login), the author is a new account (above), or the monthly cap is reached.
+
+- **Shadow** writes label, duplicate_of, confidence, $ cost, route and the draft reply to `$GITHUB_STEP_SUMMARY` only.
+- **Label** applies one label, by the label rule above, only at `min_confidence` or higher.
+- **Comment** also posts the draft. `@` mentions in it are defused with a zero-width space so the bot never pings anyone. The comment ends with an automated-draft footer and a hidden marker, `<!-- issuebot: {"label": ..., "duplicate_of": ..., "confidence": ...} -->`, that the feedback loop reads back.
+
+The issue title and body are wrapped in an `<issue>` block in the user turn (a literal `</issue>` in them is escaped) and labeled untrusted data, and the system prompt says instructions inside it are never commands. The body is capped at 8000 chars. The action only reads the repo and only triggers on `issues.opened` (never `pull_request_target`). The `concurrency` group serializes bursts; note that GitHub keeps only one pending run per group, so in a flood some runs are dropped rather than queued.
+
+`ISSUEBOT_DRY_RUN=1` in the step env runs the guards, validates the config and renders the prompt, then prints the plan. It makes no model calls and no writes. The `action-smoke` job in `test.yml` runs the local action (`uses: ./`) this way on every push, against `tests/fixtures/issue_opened.json` (`ISSUEBOT_EVENT` overrides the event path), with no secrets.
 
 ## Project layout
 

@@ -43,7 +43,8 @@ The Batch API takes 50% off and stacks with cache discounts. A cache write costs
 **Stage 1 status.**
 - [x] Per-repo config `.github/issuebot.toml` (TOML via stdlib `tomllib`, not YAML, so no new dependency), strictly validated: mode, routed, threshold, min_confidence, label_map, label_prefix (`bot:`), docs, per_issue_cap_usd, monthly_issue_cap, skip_new_accounts_days. Inputs/env > file > defaults.
 - [x] Monthly cap counts issues *opened* this month (one search call) rather than `bot:*` labels, so shadow runs and verbatim `label_map` labels count too.
-- [x] New-account skip (author_association NONE, account < 7 days) runs before any model call.
+- [x] New-account skip (author_association NONE / FIRST_TIME_CONTRIBUTOR / FIRST_TIMER, account < 7 days) runs before any model call.
+- [x] Action guards: non-`issues.opened` events, pull requests and bot authors skip for free. Issue text is delimited as untrusted data (`</issue>` escaped), comment replies have `@` mentions defused and carry a hidden `<!-- issuebot: {...} -->` prediction marker, and `ISSUEBOT_DRY_RUN=1` is smoke-tested via `uses: ./` in CI.
 
 Nothing beyond Stage 4 is planned. Split web/worker, persistent clone volumes or a Postgres issue mirror get considered only if queue wait p95 stays above 2 min for 3 days or GitHub/Anthropic 429s hit more than 1% of jobs. Otherwise infra stays frozen and the time goes into evals and writeups.
 

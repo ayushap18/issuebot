@@ -12,3 +12,17 @@ jobs:
           python-version: "3.13"
       - run: pip install -e .
       - run: python -m unittest discover -s tests -v
+  action-smoke:
+    # Exercises the composite action end to end (install, config, guards, prompt) with no secrets and no API calls.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./
+        env:
+          ISSUEBOT_DRY_RUN: "1"
+          ISSUEBOT_EVENT: tests/fixtures/issue_opened.json
+        with:
+          anthropic-api-key: unused-in-dry-run
+          config-path: examples/issuebot.toml
