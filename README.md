@@ -178,64 +178,84 @@ Run the offline tests (no network, no API key needed):
 python -m unittest discover -s tests -v
 ```
 
-## GitHub Action
+## Install on your repo
 
-issuebot runs on `issues.opened` as a composite action. The default mode is **shadow**: it writes the predicted label, confidence, cost and draft reply to the job summary and touches nothing on the issue.
+issuebot runs on `issues.opened` as a composite GitHub Action with your own Anthropic key (BYOK). Nothing runs on my side: your key, your Actions minutes, your bill.
 
-It is bring-your-own-key: copy `examples/issuebot.yml` to `.github/workflows/issuebot.yml` in your repo and add an `ANTHROPIC_API_KEY` secret. The job needs exactly `permissions: { issues: write, contents: read }` and a checkout with `persist-credentials: false`:
+1. **Add the workflow.** Copy [`examples/issuebot.yml`](examples/issuebot.yml) to `.github/workflows/issuebot.yml`:
 
-```yaml
-on:
-  issues:
-    types: [opened]
-permissions:
-  contents: read
-  issues: write   # only used in label/comment modes
-concurrency:
-  group: issuebot-${{ github.repository }}
-  cancel-in-progress: false
-jobs:
-  triage:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-      - uses: ayushap18/issuebot@v1
-        with:
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-```
+   ```yaml
+   name: issuebot
+   on:
+     issues:
+       types: [opened]
+   permissions:
+     contents: read
+     issues: write   # only used in label/comment modes
+   concurrency:      # a spam burst queues instead of fanning out
+     group: issuebot-${{ github.repository }}
+     cancel-in-progress: false
+   jobs:
+     triage:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v4
+           with:
+             fetch-depth: 1
+             persist-credentials: false
+         - uses: ayushap18/issuebot@v1
+           with:
+             anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+   ```
+
+   `@v1` is not tagged yet; until it is, use `ayushap18/issuebot@main` or pin a commit SHA.
+
+   Required permissions are exactly `contents: read` and `issues: write`, nothing else. Keep `persist-credentials: false` so no token lands in `.git/config` where the read-only tools could see it.
+
+2. **Add the secret.** Repo Settings > Secrets and variables > Actions > New repository secret, named `ANTHROPIC_API_KEY`. Or with `gh`: `gh secret set ANTHROPIC_API_KEY --repo owner/repo`.
+
+3. **Set a spend limit.** Give issuebot its own workspace in the Anthropic Console and set a monthly spend limit on it. That is the only hard money cap. `per_issue_cap_usd` and `monthly_issue_cap` below bound normal runs, but they are best-effort checks inside a stateless job.
+
+4. **Optionally add a config.** Copy [`examples/issuebot.toml`](examples/issuebot.toml) to `.github/issuebot.toml`. Without it every key takes its default (shadow mode).
+
+5. **Promote slowly: shadow, then label, then comment.**
+   - `mode = "shadow"` (default): each run writes label, duplicate_of, confidence, $ cost, route and the draft reply to the job summary. Nothing on the issue changes. Read a few weeks of summaries.
+   - `mode = "label"`: applies one label at `min_confidence` or above. Unmapped labels get the `bot:` prefix (`bot:bug`), so they never collide with your own. Add `label_map` entries once you trust a class.
+   - `mode = "comment"`: also posts the draft reply. Only switch when the labels have held up; one bad public reply costs more than no reply.
+
+   To be counted by the feedback loop (below), add your repo to [`adopters.txt`](adopters.txt) with a PR.
+
+### Action inputs
 
 | Input | Default | Notes |
 |---|---|---|
 | `anthropic-api-key` | required | |
 | `github-token` | `${{ github.token }}` | |
-| `config-path` | `.github/issuebot.toml` | repo config path, relative to the checkout (see below) |
-| `mode` | config / `shadow` | blank inputs below fall back to the repo config, then its default |
-| `model` | `claude-sonnet-5-5` | |
+| `config-path` | `.github/issuebot.toml` | relative to the checkout. The default file is optional; a path set here must exist |
+| `mode` | config / `shadow` | blank inputs fall back to the repo config, then its default |
+| `model` | `claude-sonnet-5-5` | ignored when routed |
 | `min-confidence` | config / `0.8` | |
 | `label-map` | config / `{}` | JSON form of `label_map`, e.g. `{"bug":"bug"}`; replaces the file's table |
-| `max-steps` | `8` | |
+| `max-steps` | `8` | ignored when routed |
 | `routed` | config / `false` | |
 | `threshold` | config / `0.8` | |
 
-### Repo config
+### Config reference
 
-Optionally copy `examples/issuebot.toml` to `.github/issuebot.toml` (read with stdlib `tomllib` from the checkout; another path via the `config-path` input / `ISSUEBOT_CONFIG`, which must then exist). Every key is optional and validated strictly: an unknown key or a wrong type fails the run with a message naming each bad key. Precedence: an action input / `ISSUEBOT_*` env var that is set (non-blank) > the file > the default.
+Read with stdlib `tomllib`. Every key is optional and validated strictly by `CONFIG` in `issuebot/agent.py`: an unknown key or a bad value fails the run with a message naming each bad key. Precedence: an action input / `ISSUEBOT_*` env var that is set (non-blank) > the file > the default. The first three columns are generated from the validator.
 
-| Key | Default | Notes |
-|---|---|---|
-| `mode` | `"shadow"` | `shadow` = summary only; `label` = apply a label; `comment` = label + post the draft reply (mentions, images, off-repo links and cross-repo refs defused) |
-| `routed` | `false` | `true` = Haiku triage first; Sonnet drafts only when unsure or the label is bug/question |
-| `threshold` | `0.8` | routed mode confidence gate |
-| `min_confidence` | `0.8` | nothing is written below this |
-| `label_map` | `{}` | table from issuebot labels (`bug`, `question`, `feature`, `duplicate`) to your labels |
-| `label_prefix` | `"bot:"` | **Label rule:** a `label_map` entry is applied verbatim; any other label is applied as `label_prefix + label` (`bot:feature`). `""` = apply only mapped labels |
-| `docs` | `["docs"]` | doc dirs `list_docs` may list (its allowlist) |
-| `per_issue_cap_usd` | `0.15` | per-issue $ ceiling (`CEILING`) |
-| `monthly_issue_cap` | `0` | skip once more than this many issues were opened this month (one search call; 0 = unlimited). Also set an Anthropic workspace spend limit: that is the hard money cap |
-| `skip_new_accounts_days` | `7` | skip authors with `author_association` NONE / FIRST_TIME_CONTRIBUTOR / FIRST_TIMER whose account is younger than this (one `GET /users/{login}`; 0 = off) |
+| Key | Default | Valid values | Notes |
+|---|---|---|---|
+| `mode` | `"shadow"` | "shadow", "label" or "comment" | `shadow` = job summary only; `label` = apply a label; `comment` = label + post the draft reply |
+| `routed` | `false` | true or false | Haiku triage first; Sonnet drafts only when Haiku confidence < `threshold` or the label is bug/question |
+| `threshold` | `0.8` | a number from 0 to 1 | routed mode confidence gate |
+| `min_confidence` | `0.8` | a number from 0 to 1 | nothing is written to the issue below this |
+| `label_map` | `{}` | a table from question/bug/duplicate/feature to your label names | a mapped label is applied verbatim |
+| `label_prefix` | `"bot:"` | a string | unmapped labels are applied as `label_prefix + label`; `""` = apply only mapped labels |
+| `docs` | `["docs"]` | a list of directories | the dirs `list_docs` may list (its allowlist) |
+| `per_issue_cap_usd` | `0.15` | a number > 0 | past this $ the loop gets one submit-only step, then stops (`capped: true`) |
+| `monthly_issue_cap` | `0` | an integer >= 0 (0 = unlimited) | skip once more than this many issues were opened this month (one search call). Counts all issues opened, not only triaged ones |
+| `skip_new_accounts_days` | `7` | an integer >= 0 (0 = off) | skip authors with `author_association` NONE / FIRST_TIME_CONTRIBUTOR / FIRST_TIMER whose account is younger than this (one `GET /users/{login}`) |
 
 ### Guards and output
 
@@ -243,15 +263,29 @@ Free guards run before any model call. The run exits 0 with a one-line job summa
 
 - **Shadow** writes label, duplicate_of, confidence, $ cost, route and the draft reply to `$GITHUB_STEP_SUMMARY` only.
 - **Label** applies one label, by the label rule above, only at `min_confidence` or higher.
-- **Comment** also posts the draft. `@` mentions in it are defused with a zero-width space so the bot never pings anyone. The comment ends with an automated-draft footer and a hidden marker, `<!-- issuebot: {"label": ..., "duplicate_of": ..., "confidence": ...} -->`, that the feedback loop reads back.
-
-The issue title and body are wrapped in an `<issue>` block in the user turn (a literal `</issue>` in them is escaped) and labeled untrusted data, and the system prompt says instructions inside it are never commands. The body is capped at 8000 chars. The action only reads the repo and only triggers on `issues.opened` (never `pull_request_target`). The `concurrency` group serializes bursts; note that GitHub keeps only one pending run per group, so in a flood some runs are dropped rather than queued.
+- **Comment** also posts the draft (also gated on `min_confidence`). It ends with an automated-draft footer and a hidden marker, `<!-- issuebot: {"label": ..., "duplicate_of": ..., "confidence": ..., "applied": ...} -->`, that the feedback loop reads back.
 
 `ISSUEBOT_DRY_RUN=1` in the step env runs the guards, validates the config and renders the prompt, then prints the plan. It makes no model calls and no writes. The `action-smoke` job in `test.yml` runs the local action (`uses: ./`) this way on every push, against `tests/fixtures/issue_opened.json` (`ISSUEBOT_EVENT` overrides the event path), with no secrets.
 
+### Security model
+
+Issue text is untrusted input from anyone on the internet.
+
+- **Prompt injection.** Title and body sit in an `<issue>` block in the user turn (a literal `<issue`/`</issue>` in them is escaped), labeled untrusted data, and the system prompt says instructions inside it are never commands. Body capped at 8000 chars. Output must parse as `{label, duplicate_of, reply, confidence}` and `label` is forced into the four known labels. Default mode writes nothing to the issue.
+- **Posted replies are defused.** `@` mentions get a zero-width space (no pings), images and off-repo links become inline code (no beacons or phishing links), and `owner/repo#N` cross-references are broken so they don't backlink.
+- **File exfiltration.** All four tools are read-only. `read_file` resolves symlinks and rejects paths outside the checkout, `.git/`, `.env*`, `*.pem` and `*.key`; `grep_repo` excludes the same globs; `list_docs` only lists the `docs` allowlist. The checkout uses `persist-credentials: false`.
+- **Spam and cost.** The `concurrency` group serializes bursts (GitHub keeps only one pending run per group, so in a flood some runs are dropped rather than queued). Bots and new accounts are skipped before any model call. Then the per-issue $ cap, the monthly issue cap and your workspace spend limit.
+- **Token scope.** The job needs only `contents: read` and `issues: write`. The only trigger is `issues.opened`, never `pull_request_target`. Your API key stays in your repo secret; issuebot stores nothing.
+
 ### Feedback loop
 
-`adopters.txt` lists repos running issuebot. `.github/workflows/feedback.yml` (weekly + manual) runs `python -m issuebot.feedback [--days 7]` from this repo; adopters send no telemetry. For issues created in the `--days` before the last 7 days (so every bot label has had 7 days) that carry a `bot:` label or a bot-authored comment marker, it scores agreement: the label was kept 7 days (timeline `labeled`/`unlabeled`; swapping `bot:bug` for the repo's own `bug` counts as kept), or a maintainer closed it as a duplicate (label only, same rules as `gold()`). Misses on closed issues with a maintainer reply are appended to `eval/candidates/<owner>__<repo>.jsonl` as dataset rows (`sha: null`, deduped by number). Only duplicates get an automatic gold label; other rows have `gold_label: null` and need a hand `label_override`, since `gold()` knows only vitest's label names. A repo whose agreement is more than 10pts under the offline baseline (`eval/baseline.json` cases with confidence >= the default `min_confidence`, i.e. the ones the live bot would label), or whose bot label is gone from its label set, prints a `DRIFT` line; the workflow commits candidates and opens one `Drift: <repo>` issue (skipped while one is open). `python -m issuebot.feedback --promote [--min 20] [--force]` merges labeled candidates into `eval/dataset.jsonl` once 20 new ones exist (dedup by repo+number, numbers already used by another repo are refused, SHA from a clone, new rows split by date among themselves so existing splits don't move) and clears them. Adding dev rows reshuffles the gate's `--stratify` slice, so re-record `eval/baseline.json` after a promote.
+Adopters send no telemetry. [`adopters.txt`](adopters.txt) lists repos running issuebot (one `owner/repo` per line, `#` comments allowed). `.github/workflows/feedback.yml` runs weekly (Monday 06:00 UTC) and on manual dispatch in this repo, calling `python -m issuebot.feedback [--days 7]`, which reads each adopter's public issue timelines with this repo's token.
+
+- **Window.** Issues created in the `--days` before the last 7 days, so every bot label has had 7 days, that carry a `bot:` label or a bot-authored comment marker.
+- **Agreement.** The label was kept 7 days (timeline `labeled`/`unlabeled`; swapping `bot:bug` for the repo's own `bug` counts as kept), or a maintainer closed it as a duplicate (label only, same rules as `gold()`).
+- **Misses.** Misses on closed issues with a maintainer reply are appended to `eval/candidates/<owner>__<repo>.jsonl` as dataset rows (`sha: null`, deduped by number). Only duplicates get an automatic gold label; other rows have `gold_label: null` and need a hand `label_override`, since `gold()` knows only vitest's label names.
+- **Drift.** A repo whose agreement is more than 10pts under the offline baseline (`eval/baseline.json` cases with confidence >= the default `min_confidence`, i.e. the ones the live bot would label), or whose bot label is gone from its label set, prints a `DRIFT` line. The workflow commits candidates and opens one `Drift: <repo>` issue (skipped while one is open).
+- **Promotion.** `python -m issuebot.feedback --promote [--min 20] [--force]` merges labeled candidates into `eval/dataset.jsonl` once 20 new ones exist (dedup by repo+number, numbers already used by another repo are refused, SHA from a clone, new rows split by date among themselves so existing splits don't move) and clears them. Adding dev rows reshuffles the gate's `--stratify` slice, so re-record `eval/baseline.json` after a promote.
 
 ## Project layout
 
@@ -285,6 +319,13 @@ SCALING.md        what changes when this runs on many repos
 - [x] Judge calibration tooling (`--export-grading`, `--calibrate`)
 - [x] Failure tagging for the Stage 3 trigger (`--tag-failures`)
 - [ ] Commit `eval/baseline.json` + `eval/replay/` so the gate runs instead of skipping
+
+**Stage 1: reusable Action, BYOK (built, see SCALING.md)**
+- [x] Per-repo `.github/issuebot.toml` (stdlib `tomllib`), strictly validated, inputs/env > file > defaults
+- [x] Free guards: non-`issues.opened`, PRs, bots, new accounts, monthly issue cap
+- [x] Injection hardening: delimited issue text, defused replies, hidden prediction marker, dry-run smoke test in CI
+- [x] Weekly feedback loop over `adopters.txt`: label-kept agreement, miss candidates, drift issues, `--promote`
+- [ ] Tag `v1` so `ayushap18/issuebot@v1` resolves, then install in shadow on 1-3 live repos
 
 **Week 1: dataset + baseline**
 - [ ] Pull 300 rows into `eval/dataset.jsonl` and commit it

@@ -549,4 +549,12 @@ packages = ["issuebot"]
 - [x] Failure tagging: `--tag-failures` (Stage 3 trigger at >= 30% retrieval misses)
 - [ ] Every week 1-4 exit above: none has run yet, so no result files or numbers exist
 
+**Built ahead of the roadmap (SCALING.md Stage 1)**
+- [x] Per-repo `.github/issuebot.toml` config (stdlib `tomllib` instead of YAML), validated by `CONFIG` in `agent.py`
+- [x] Free Action guards (event, PR, bot, new account, monthly issue cap) and `ISSUEBOT_DRY_RUN=1` smoke test
+- [x] Injection hardening: escaped `<issue>` block, defused replies, hidden prediction marker on comments
+- [x] Weekly feedback loop over `adopters.txt` (`issuebot/feedback.py`, `feedback.yml`) with candidates, drift and `--promote`
+- [x] README "Install on your repo": workflow, permissions, secret, spend limit, shadow -> label -> comment
+- [ ] Tag `v1` and install on a live repo (week 4 above)
+
 Skipped in v1: vector search, Batch API and parallel eval workers. SCALING.md lists the trigger for each.

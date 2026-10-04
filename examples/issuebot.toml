@@ -12,8 +12,8 @@ label_prefix = "bot:"
 
 docs = ["docs"]              # doc directories list_docs may list
 per_issue_cap_usd = 0.15     # stop tool calls past this $ per issue, then one submit-only step
-monthly_issue_cap = 0        # skip once this many issues were opened this month (0 = unlimited)
-skip_new_accounts_days = 7   # skip first-time authors (author_association NONE) with accounts younger than this (0 = off)
+monthly_issue_cap = 0        # skip once more than this many issues were opened this month (0 = unlimited)
+skip_new_accounts_days = 7   # skip NONE / FIRST_TIME_CONTRIBUTOR / FIRST_TIMER authors with accounts younger than this (0 = off)
 
 [label_map]                  # keys: bug, question, feature, duplicate
 # bug = "bug"

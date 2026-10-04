@@ -40,12 +40,22 @@ The Batch API takes 50% off and stacks with cache discounts. A cache write costs
 - [ ] Frozen eval set and stored baseline (`eval/dataset.jsonl`, `eval/baseline.json`, `eval/replay/`); until committed the gate skips.
 - [ ] Test split scored only on release tags; cached prefix padded above 4096 tokens; Batch for single-turn calls; 2+ weeks shadow on a live repo.
 
-**Stage 1 status.**
-- [x] Per-repo config `.github/issuebot.toml` (TOML via stdlib `tomllib`, not YAML, so no new dependency), strictly validated: mode, routed, threshold, min_confidence, label_map, label_prefix (`bot:`), docs, per_issue_cap_usd, monthly_issue_cap, skip_new_accounts_days. Inputs/env > file > defaults.
-- [x] Monthly cap counts issues *opened* this month (one search call) rather than `bot:*` labels, so shadow runs and verbatim `label_map` labels count too.
-- [x] New-account skip (author_association NONE / FIRST_TIME_CONTRIBUTOR / FIRST_TIMER, account < 7 days) runs before any model call.
-- [x] Action guards: non-`issues.opened` events, pull requests and bot authors skip for free. Issue text is delimited as untrusted data (`</issue>` escaped), comment replies have `@` mentions defused and carry a hidden `<!-- issuebot: {...} -->` prediction marker, and `ISSUEBOT_DRY_RUN=1` is smoke-tested via `uses: ./` in CI.
-- [x] Feedback loop: `issuebot.feedback` + weekly `feedback.yml` read `adopters.txt` repos' timelines (label kept 7 days, confirmed duplicate), append misses to `eval/candidates/` (path is `eval/`, not `evals/`), print DRIFT and open one `Drift: <repo>` issue. **[deviation]** The label drift check flags a bot label missing from the repo's label set, not new repo labels the bot doesn't know. `--promote` merges at 20+ candidates. The window ends 7 days ago so labels can be judged.
+**Stage 1 status.** Built and offline-tested; not installed on a live repo yet.
+- [x] Reusable composite Action (`action.yml`), BYOK via the adopter's `ANTHROPIC_API_KEY` secret. Copy-paste install, permissions, spend-limit advice and the shadow -> label -> comment progression are in the README's "Install on your repo".
+- [x] Per-repo config `.github/issuebot.toml`, strictly validated by `CONFIG` in `agent.py`: mode, routed, threshold, min_confidence, label_map, label_prefix (`bot:`), docs, per_issue_cap_usd, monthly_issue_cap, skip_new_accounts_days. Inputs/env > file > defaults. **[deviation]** TOML via stdlib `tomllib`, not YAML, so no new dependency.
+- [x] Shadow output goes to the job step summary only, never a comment. Bot labels use the `bot:` prefix unless mapped.
+- [x] Monthly cap. **[deviation]** Counts issues *opened* this month (one search call), not `bot:*` labels: search has no label wildcard and shadow mode applies no labels.
+- [x] New-account skip (author_association NONE / FIRST_TIME_CONTRIBUTOR / FIRST_TIMER, account < 7 days by default) runs before any model call.
+- [x] Action guards: non-`issues.opened` events, pull requests and bot authors skip for free. Issue text is delimited as untrusted data (`<issue`/`</issue>` escaped), comment replies have mentions, images, off-repo links and cross-repo refs defused and carry a hidden `<!-- issuebot: {...} -->` prediction marker, and `ISSUEBOT_DRY_RUN=1` is smoke-tested via `uses: ./` in CI.
+- [x] Feedback loop: `issuebot.feedback` + weekly `feedback.yml` read `adopters.txt` repos' timelines (label kept 7 days, confirmed duplicate), append misses to `eval/candidates/` (**[deviation]** `eval/`, not `evals/`), print DRIFT and open one `Drift: <repo>` issue. `--promote` merges at 20+ candidates. The window ends 7 days ago so labels can be judged. **[deviation]** The label drift check flags a bot label missing from the repo's label set, not new repo labels the bot doesn't know. The maintainer's first reply is only stored on miss candidates, not scored.
+- [ ] Tag `v1` (the README tells adopters to use `@main` or a SHA until then) and install in shadow / label-only on 1-3 live repos.
+
+**Stage 1 deviations from "Abuse and security" below:**
+- Comment mode has no Stage 2 unlock yet; the unlock is the repo admin setting `mode = "comment"`.
+- The path denylist is `.git/`, `.env*`, `*.pem`, `*.key` (plus outside-the-checkout and symlink escapes). There is no `.github/workflows/` entry and no general path allowlist; the config's `docs` list only scopes `list_docs`.
+- There is no Haiku spam check; the free bot / new-account / monthly-cap filters are the whole pre-filter.
+- `label` is checked against the four built-in labels, not the repo's label map; unmapped labels get `label_prefix`.
+- The `concurrency` group serializes runs but GitHub keeps only one pending run per group, so a flood drops runs instead of queueing them.
 
 Nothing beyond Stage 4 is planned. Split web/worker, persistent clone volumes or a Postgres issue mirror get considered only if queue wait p95 stays above 2 min for 3 days or GitHub/Anthropic 429s hit more than 1% of jobs. Otherwise infra stays frozen and the time goes into evals and writeups.
 
