@@ -557,4 +557,10 @@ packages = ["issuebot"]
 - [x] README "Install on your repo": workflow, permissions, secret, spend limit, shadow -> label -> comment
 - [ ] Tag `v1` and install on a live repo (week 4 above)
 
+**Built ahead of the roadmap (SCALING.md Stage 2)**
+- [x] `issuebot/backtest.py`: per-repo backtest on the last N closed issues, cached REST corpus, search throttled to <= 25/min, scorecard; `examples/issuebot-backtest.yml`
+- [x] Per-repo unlock/demote: `eval/status.json` from the weekly feedback run, `min(configured, status)` in the Action, fail closed to label
+- [x] `issuebot/dashboard.py` + `pages.yml`: static GitHub Pages dashboard, worst repo first; Marketplace `branding:` in `action.yml`
+- [ ] Run backtests on 3-5 public repos and commit their results; publish to the Marketplace
+
 Skipped in v1: vector search, Batch API and parallel eval workers. SCALING.md lists the trigger for each.

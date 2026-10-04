@@ -121,6 +121,8 @@ cp results/baseline.json eval/baseline.json
 
 No numbers yet. Every row below is a placeholder until it is produced by the harness and committed to `results/`.
 
+Dashboard: <https://ayushap18.github.io/issuebot/>, built by `.github/workflows/pages.yml` on every push to main from `results/*.json` and `eval/status.json` (worst repo first; it says "No results yet" until a results file is committed). Pages must be enabled once in the repo settings with source "GitHub Actions". Build it locally with `python -m issuebot.dashboard [--results results] [--status eval/status.json] [--out site]`.
+
 | Run | Split | n | Label acc (floor) | Macro-F1 | Dup P / R | Judge mean | Confidently wrong | $/issue | p50 / p95 latency |
 |---|---|---|---|---|---|---|---|---|---|
 | Baseline, Sonnet 5.5 (no tools) | dev | TBD | TBD — run `python -m issuebot.run_eval` | TBD | TBD | TBD | TBD | TBD | TBD |
@@ -221,9 +223,23 @@ issuebot runs on `issues.opened` as a composite GitHub Action with your own Anth
 5. **Promote slowly: shadow, then label, then comment.**
    - `mode = "shadow"` (default): each run writes label, duplicate_of, confidence, $ cost, route and the draft reply to the job summary. Nothing on the issue changes. Read a few weeks of summaries.
    - `mode = "label"`: applies one label at `min_confidence` or above. Unmapped labels get the `bot:` prefix (`bot:bug`), so they never collide with your own. Add `label_map` entries once you trust a class.
-   - `mode = "comment"`: also posts the draft reply. Only switch when the labels have held up; one bad public reply costs more than no reply.
+   - `mode = "comment"`: also posts the draft reply. Only switch when the labels have held up; one bad public reply costs more than no reply. Comment mode also needs a per-repo unlock (see [Per-repo unlock and auto-demotion](#per-repo-unlock-and-auto-demotion)); until then the Action runs it as label mode.
 
    To be counted by the feedback loop (below), add your repo to [`adopters.txt`](adopters.txt) with a PR.
+
+### Backtest before installing
+
+See how issuebot would have done on your own repo before it touches a live issue:
+
+```bash
+python -m issuebot.backtest owner/repo [--n 100] [--mode agent|routed] [--out results/backtest-owner__repo.json]
+```
+
+It takes the last `--n` closed issues that got a maintainer reply (same filters and gold labels as `build_eval`), runs each with the repo checked out at the commit before the issue was opened and with search limited to earlier issues, judges every reply against the maintainer's, and writes the results file plus a markdown scorecard (label accuracy, duplicates found X/Y, judge mean, $ total and $/issue, p50/p95 latency, the 10 worst replies with links) to stdout and the job summary.
+
+The repo's issue list is fetched once through the REST list endpoint and cached at `cache/corpus-<owner>__<repo>.json` (reruns fetch only issues updated since). `search_issues` is answered from that corpus (every query term must match title or body; created before the issue, never the issue itself) and only a local miss calls the GitHub search API. Every search API call in issuebot is spaced to at most 25/min and honors `retry-after` / `x-ratelimit-reset`.
+
+To run it in Actions on your key, copy [`examples/issuebot-backtest.yml`](examples/issuebot-backtest.yml) to `.github/workflows/` and run it from the Actions tab (input `n`). It needs only `contents: read` + `issues: read`, caches `cache/` with `actions/cache`, and uploads the results JSON as an artifact. Expect roughly $5-9 per 100 issues. Public repos only (the clone is anonymous).
 
 ### Action inputs
 
@@ -287,6 +303,22 @@ Adopters send no telemetry. [`adopters.txt`](adopters.txt) lists repos running i
 - **Drift.** A repo whose agreement is more than 10pts under the offline baseline (`eval/baseline.json` cases with confidence >= the default `min_confidence`, i.e. the ones the live bot would label), or whose bot label is gone from its label set, prints a `DRIFT` line. The workflow commits candidates and opens one `Drift: <repo>` issue (skipped while one is open).
 - **Promotion.** `python -m issuebot.feedback --promote [--min 20] [--force]` merges labeled candidates into `eval/dataset.jsonl` once 20 new ones exist (dedup by repo+number, numbers already used by another repo are refused, SHA from a clone, new rows split by date among themselves so existing splits don't move) and clears them. Adding dev rows reshuffles the gate's `--stratify` slice, so re-record `eval/baseline.json` after a promote.
 
+### Per-repo unlock and auto-demotion
+
+The weekly feedback run also keeps each adopter's last 100 scored issues (`eval/scored.json`) and writes `eval/status.json`:
+
+```json
+{"owner/repo": {"kept_rate": 0.93, "n": 100, "status": "comment", "updated": "2026-10-05T06:00:00+00:00"}}
+```
+
+| Rule | status |
+|---|---|
+| n >= 100 and label kept >= 90% | `comment` |
+| n >= 20 and label kept < 75% | `shadow` (auto-demoted) |
+| otherwise | `label` |
+
+On every non-shadow run the Action fetches `https://raw.githubusercontent.com/ayushap18/issuebot/main/eval/status.json` once (5s timeout; override with `ISSUEBOT_STATUS_URL`) and uses the lower of your configured mode and the repo's status (shadow < label < comment). It fails closed: if the fetch fails or your repo isn't listed, `comment` runs as `label`; `shadow` and `label` are unaffected. The effective mode and the reason are in the job summary. Being listed requires your repo in `adopters.txt`.
+
 ## Project layout
 
 ```
@@ -297,13 +329,17 @@ issuebot/
   run_eval.py     run agent/baseline/routed, score, write results/<name>.json, --compare, --gate,
                   --export-grading / --calibrate, --tag-failures
   judge.py        LLM-as-judge vs the maintainer's reply, failure-cause tagger
-  feedback.py     weekly adopter feedback: agreement, miss candidates, drift, --promote
+  feedback.py     weekly adopter feedback: agreement, miss candidates, drift, per-repo status, --promote
+  backtest.py     backtest one repo's last N closed issues, cached corpus, scorecard
+  dashboard.py    static site/index.html from results/*.json + eval/status.json
 tests/            offline unittest suite (fake Anthropic client, httpx.MockTransport, temp git repos)
-eval/             dataset.jsonl, baseline.json + replay/ for the CI gate (not committed yet)
+eval/             dataset.jsonl, baseline.json + replay/ for the CI gate (not committed yet); status.json +
+                  scored.json written by the weekly feedback run
 results/          committed result files
 runs/             per-run JSONL traces (gitignored)
-examples/         example workflow and repo config (issuebot.toml) for adopters
-.github/workflows test.yml (offline tests), eval-gate.yml (regression gate on PRs), feedback.yml (weekly)
+examples/         example workflows (issuebot.yml, issuebot-backtest.yml) and repo config (issuebot.toml)
+.github/workflows test.yml (offline tests), eval-gate.yml (regression gate on PRs), feedback.yml (weekly),
+                  pages.yml (dashboard)
 adopters.txt      repos the feedback loop reads
 action.yml        composite GitHub Action
 PLAN.md           build plan and design decisions
@@ -326,6 +362,12 @@ SCALING.md        what changes when this runs on many repos
 - [x] Injection hardening: delimited issue text, defused replies, hidden prediction marker, dry-run smoke test in CI
 - [x] Weekly feedback loop over `adopters.txt`: label-kept agreement, miss candidates, drift issues, `--promote`
 - [ ] Tag `v1` so `ayushap18/issuebot@v1` resolves, then install in shadow on 1-3 live repos
+
+**Stage 2: multi-repo (built, see SCALING.md)**
+- [x] `python -m issuebot.backtest owner/repo`: leakage-safe backtest with a cached issue corpus, throttled search, scorecard; `examples/issuebot-backtest.yml`
+- [x] Per-repo unlock/demote in `eval/status.json`, enforced by the Action (fail closed to label)
+- [x] Static dashboard on GitHub Pages, worst repo first; `branding:` in `action.yml`
+- [ ] Publish backtest scorecards for 3-5 popular public repos; list on the Marketplace; 10-case CI slice per opted-in repo
 
 **Week 1: dataset + baseline**
 - [ ] Pull 300 rows into `eval/dataset.jsonl` and commit it
