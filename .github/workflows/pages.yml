@@ -2,11 +2,12 @@ name: pages
 on:
   push:
     branches: [main]
+  workflow_run:   # the weekly feedback commit uses GITHUB_TOKEN, which doesn't trigger push workflows
+    workflows: [feedback]
+    types: [completed]
   workflow_dispatch:
 permissions:
   contents: read
-  pages: write
-  id-token: write
 concurrency:
   group: pages
   cancel-in-progress: true
@@ -26,6 +27,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

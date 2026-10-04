@@ -35,6 +35,16 @@ def gh(path: str, method="GET", **kw) -> dict | list:
         return r.json()
 
 
+def pages(path: str, params: dict | None = None, stop=lambda x: False) -> list:
+    out, page = [], 1
+    while True:
+        batch = gh(path, params={**(params or {}), "per_page": 100, "page": page})
+        out += [x for x in batch if not stop(x)]
+        if len(batch) < 100 or any(map(stop, batch)):
+            return out
+        page += 1
+
+
 def git(*args, cwd=None) -> str:
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout
 
@@ -131,22 +141,27 @@ def list_docs(ctx, subdir: str = "") -> str:
     return _cap(out.strip(), 8000) or "no docs"
 
 
+def _hit(i: dict) -> tuple:
+    # Leakage rule: keep only fields known when the issue was opened. No state, labels, comments, closed_at.
+    return i["number"], i["created_at"], i["title"], (i.get("body") or "")[:400]
+
+
 @lru_cache(maxsize=1024)  # ponytail: in-process cache; disk cache if reruns become frequent
 def _search(repo: str, created_at: str, query: str, n: int) -> tuple:
     # in:title,body: comments can postdate the issue being answered, so matching on them leaks.
     q = f"repo:{repo} is:issue in:title,body created:<{created_at} {query}"
     items = gh("/search/issues", params={"q": q, "per_page": n})["items"]
-    # Leakage rule: keep only fields known when the issue was opened. No state, labels, comments, closed_at.
-    return tuple((i["number"], i["created_at"], i["title"], (i.get("body") or "")[:400]) for i in items)
+    return tuple(map(_hit, items))
 
 
 def _local(corpus: list[dict], created_at: str, number: int, query: str, n: int) -> list[tuple]:
     # ponytail: every-term substring match, newest first, not GitHub's ranking; SQLite FTS5 is the Stage 3 upgrade.
-    terms = [t.lower() for t in query.replace('"', " ").split() if ":" not in t]  # qualifiers dropped
+    terms = [t.lower() for t in query.replace('"', " ").split()  # qualifiers, operators and exclusions dropped
+             if ":" not in t and t not in ("OR", "AND", "NOT") and not t.startswith("-")]
     hits = [i for i in corpus if i["created_at"] < created_at and i["number"] != number
             and all(t in f"{i['title']}\n{i.get('body') or ''}".lower() for t in terms)]
     hits.sort(key=lambda i: i["created_at"], reverse=True)
-    return [(i["number"], i["created_at"], i["title"], (i.get("body") or "")[:400]) for i in hits[:n]]
+    return [_hit(i) for i in hits[:n]]
 
 
 def search_issues(ctx, query: str, max_results: int = 10) -> str:

@@ -74,6 +74,14 @@ CASES = [
 ]
 
 
+class BuildTest(unittest.TestCase):
+    def test_zero_limit_makes_no_calls(self):
+        with mock.patch.object(build_eval, "clone", side_effect=AssertionError("clone")), \
+                mock.patch.object(build_eval, "gh", side_effect=AssertionError("gh")):
+            self.assertEqual(build_eval.build("o/r", 0), [])
+            self.assertEqual(build_eval.build("o/r", -1, issues=[{"number": 1}]), [])
+
+
 class MetricsTest(unittest.TestCase):
     def test_hand_computed(self):
         m = run_eval.metrics(CASES)

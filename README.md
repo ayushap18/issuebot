@@ -121,7 +121,7 @@ cp results/baseline.json eval/baseline.json
 
 No numbers yet. Every row below is a placeholder until it is produced by the harness and committed to `results/`.
 
-Dashboard: <https://ayushap18.github.io/issuebot/>, built by `.github/workflows/pages.yml` on every push to main from `results/*.json` and `eval/status.json` (worst repo first; it says "No results yet" until a results file is committed). Pages must be enabled once in the repo settings with source "GitHub Actions". Build it locally with `python -m issuebot.dashboard [--results results] [--status eval/status.json] [--out site]`.
+Dashboard: <https://ayushap18.github.io/issuebot/>, built by `.github/workflows/pages.yml` on every push to main and after each feedback run from `results/*.json` and `eval/status.json` (worst repo first: live kept rate, else offline label accuracy; repos in `eval/status.json` get a row even without a results file, and it says "No results yet" only when both are empty). Pages must be enabled once in the repo settings with source "GitHub Actions". Build it locally with `python -m issuebot.dashboard [--results results] [--status eval/status.json] [--out site]`.
 
 | Run | Split | n | Label acc (floor) | Macro-F1 | Dup P / R | Judge mean | Confidently wrong | $/issue | p50 / p95 latency |
 |---|---|---|---|---|---|---|---|---|---|
@@ -210,8 +210,6 @@ issuebot runs on `issues.opened` as a composite GitHub Action with your own Anth
              anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
    ```
 
-   `@v1` is not tagged yet; until it is, use `ayushap18/issuebot@main` or pin a commit SHA.
-
    Required permissions are exactly `contents: read` and `issues: write`, nothing else. Keep `persist-credentials: false` so no token lands in `.git/config` where the read-only tools could see it.
 
 2. **Add the secret.** Repo Settings > Secrets and variables > Actions > New repository secret, named `ANTHROPIC_API_KEY`. Or with `gh`: `gh secret set ANTHROPIC_API_KEY --repo owner/repo`.
@@ -239,7 +237,7 @@ It takes the last `--n` closed issues that got a maintainer reply (same filters 
 
 The repo's issue list is fetched once through the REST list endpoint and cached at `cache/corpus-<owner>__<repo>.json` (reruns fetch only issues updated since). `search_issues` is answered from that corpus (every query term must match title or body; created before the issue, never the issue itself) and only a local miss calls the GitHub search API. Every search API call in issuebot is spaced to at most 25/min and honors `retry-after` / `x-ratelimit-reset`.
 
-To run it in Actions on your key, copy [`examples/issuebot-backtest.yml`](examples/issuebot-backtest.yml) to `.github/workflows/` and run it from the Actions tab (input `n`). It needs only `contents: read` + `issues: read`, caches `cache/` with `actions/cache`, and uploads the results JSON as an artifact. Expect roughly $5-9 per 100 issues. Public repos only (the clone is anonymous).
+To run it in Actions on your key, copy [`examples/issuebot-backtest.yml`](examples/issuebot-backtest.yml) to `.github/workflows/` and run it from the Actions tab (input `n`: 25, 50, 100 or 200; the CLI caps `--n` at 500). It installs issuebot from a pinned tag and needs `v1.1.0` or later (the first release with the backtest); pin a full commit SHA for reproducible runs. It needs only `contents: read` + `issues: read`, caches `cache/` with `actions/cache`, and uploads the results JSON as an artifact. Expect roughly $5-9 per 100 issues. Public repos only (the clone is anonymous).
 
 ### Action inputs
 
@@ -305,7 +303,7 @@ Adopters send no telemetry. [`adopters.txt`](adopters.txt) lists repos running i
 
 ### Per-repo unlock and auto-demotion
 
-The weekly feedback run also keeps each adopter's last 100 scored issues (`eval/scored.json`) and writes `eval/status.json`:
+The weekly feedback run also keeps each adopter's last 100 scored issues from the last 90 days (`eval/scored.json`, repo names lowercased) and writes `eval/status.json`. A removed label always counts; a kept label counts only if a maintainer commented or someone other than the author (not a bot) closed the issue, so ignored labels don't unlock comment mode. Outcomes older than 90 days drop out, so a repo demoted to shadow (which applies no labels) falls back under n=20 and returns to `label`. Repos removed from `adopters.txt` are dropped from both files, and a repo whose API calls fail prints a `DRIFT` line and keeps its previous status:
 
 ```json
 {"owner/repo": {"kept_rate": 0.93, "n": 100, "status": "comment", "updated": "2026-10-05T06:00:00+00:00"}}
@@ -317,7 +315,7 @@ The weekly feedback run also keeps each adopter's last 100 scored issues (`eval/
 | n >= 20 and label kept < 75% | `shadow` (auto-demoted) |
 | otherwise | `label` |
 
-On every non-shadow run the Action fetches `https://raw.githubusercontent.com/ayushap18/issuebot/main/eval/status.json` once (5s timeout; override with `ISSUEBOT_STATUS_URL`) and uses the lower of your configured mode and the repo's status (shadow < label < comment). It fails closed: if the fetch fails or your repo isn't listed, `comment` runs as `label`; `shadow` and `label` are unaffected. The effective mode and the reason are in the job summary. Being listed requires your repo in `adopters.txt`.
+On every non-shadow run the Action fetches `https://raw.githubusercontent.com/ayushap18/issuebot/main/eval/status.json` once (5s timeout; override with `ISSUEBOT_STATUS_URL`) and uses the lower of your configured mode and the repo's status (shadow < label < comment). It fails closed: if the fetch fails, your repo isn't listed, or its entry is malformed or its `updated` is more than 21 days old, `comment` runs as `label`; `shadow` and `label` are unaffected. The effective mode and the reason are in the job summary. Being listed requires your repo in `adopters.txt`.
 
 ## Project layout
 

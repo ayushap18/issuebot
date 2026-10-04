@@ -2,14 +2,12 @@
 import argparse
 import json
 import os
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 from issuebot import agent, build_eval, run_eval
-from issuebot.feedback import pages
 from issuebot.judge import JUDGE_MODEL
-from issuebot.tools import clone
+from issuebot.tools import clone, pages
 
 KEYS = ("number", "title", "body", "created_at", "html_url", "state", "state_reason", "author_association")
 
@@ -50,7 +48,9 @@ def scorecard(res: dict) -> str:
              f"| $ total | ${m['cost_total']:.2f} |",
              f"| $ / issue | ${m['cost_per_issue']:.4f} |",
              f"| latency p50 / p95 | {m['latency_p50']:.1f}s / {m['latency_p95']:.1f}s |",
-             f"| errors | {m['error_rate']:.0%} |", "", "### 10 worst replies", ""]
+             f"| errors | {m['error_rate']:.0%} |", "",
+             "Duplicate search used the local retriever (every-term match on the cached corpus, GitHub search only on a miss).", "",
+             "### 10 worst replies", ""]
     for c in worst(cs):
         why = " ".join((c.get("judge_reason") or "").split())[:200]
         lines.append(f"- [#{c['number']} {c.get('title', '')}]({c.get('url', '')}) score {c['score']}"
@@ -65,6 +65,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--mode", default="agent", choices=["agent", "routed"])
     ap.add_argument("--out")
     a = ap.parse_args(argv)
+    a.n = min(a.n, 500)
     out = Path(a.out or f"results/backtest-{a.repo.replace('/', '__')}.json")
 
     issues = corpus(a.repo)
@@ -76,9 +77,8 @@ def main(argv: list[str] | None = None) -> None:
         cases.append({**c, "url": row["url"], "title": row["title"]})
         print(f"#{c['number']} {c['gold']}->{c['pred']} score={c['score'] or '-'} ${c['cost'] + c['judge_cost']:.3f}",
               flush=True)
-    commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() or None
     res = {"name": out.stem, "repo": a.repo, "mode": a.mode, "model": agent.REPLY_MODEL, "judge_model": JUDGE_MODEL,
-           "n": len(cases), "issuebot_commit": commit, "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "n": len(cases), "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
            "metrics": run_eval.metrics(cases), "cases": cases}
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(res, indent=1))

@@ -7,6 +7,8 @@ on:
     inputs:
       n:
         description: "Closed issues to backtest"
+        type: choice
+        options: ["25", "50", "100", "200"]
         default: "100"
 permissions:
   contents: read
@@ -14,11 +16,12 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install -q "git+https://github.com/ayushap18/issuebot@main"  # pin a SHA for reproducible runs
+      - run: pip install -q "git+https://github.com/ayushap18/issuebot@v1.1.0"  # needs v1.1.0+; pin a full commit SHA for reproducible runs
       - uses: actions/cache@v4   # issue corpus JSON, refreshed incrementally
         with:
           path: cache

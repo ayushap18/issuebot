@@ -76,6 +76,8 @@ def closed_issues(repo: str):
 
 def build(repo: str, limit: int, branch: str = "origin/HEAD", issues=None) -> list[dict]:
     """Up to `limit` rows (with sha, split=None) from closed issues, newest first. `issues` defaults to the REST list."""
+    if limit <= 0:
+        return []
     src = clone(repo)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
     rows = []

@@ -171,16 +171,27 @@ def fetch_status() -> dict | None:
         return None
 
 
+STATUS_MAX_AGE = timedelta(days=21)  # older status means the weekly run stopped: treat as missing
+
+
+def _fresh(s: dict) -> bool:
+    try:
+        return datetime.now(timezone.utc) - datetime.fromisoformat(s["updated"]) <= STATUS_MAX_AGE
+    except (KeyError, TypeError, ValueError):  # missing, unparseable or naive timestamp
+        return False
+
+
 def effective_mode(mode: str, repo: str, status: dict | None) -> tuple[str, str]:
-    """min(configured mode, the repo's status). Fails closed: no status means comment drops to label."""
-    s = status.get(repo) if isinstance(status, dict) else None
-    if not isinstance(s, dict) or s.get("status") not in MODES:
-        why = "status fetch failed" if status is None else f"{repo} not in status.json"
+    """min(configured mode, the repo's status). Fails closed: no or stale status means comment drops to label."""
+    s = status.get(repo.lower()) if isinstance(status, dict) else None
+    if not isinstance(s, dict) or s.get("status") not in MODES or not _fresh(s):
+        why = ("status fetch failed" if status is None else f"{repo} not in status.json" if not isinstance(s, dict)
+               else f"{repo} status invalid or older than 21 days")
         if mode == "comment":
             return "label", f"{why}; comment needs a per-repo unlock, using label"
         return mode, f"{why}; {mode} unaffected"
     eff = min(mode, s["status"], key=MODES.index)
-    rate = "-" if s.get("kept_rate") is None else f"{s['kept_rate']:.0%}"
+    rate = f"{s['kept_rate']:.0%}" if isinstance(s.get("kept_rate"), (int, float)) else "-"
     return eff, f"configured {mode}, repo status {s['status']} (label kept {rate} over {s.get('n', 0)} issues)"
 
 
@@ -386,7 +397,7 @@ def main() -> None:
         acted.append("commented")
     if path := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(path, "a") as f:
-            f.write(f"## issuebot: #{n} ({mode})\n\nMode: {mode} ({why or 'configured'})\n\n| label | duplicate_of | confidence | cost | route | steps |\n"
+            f.write(f"## issuebot: #{n}\n\nMode: {mode} ({why or 'configured'})\n\n| label | duplicate_of | confidence | cost | route | steps |\n"
                     f"|---|---|---|---|---|---|\n| {rec['label']} | {rec['duplicate_of'] or '-'} | {rec['confidence']:.2f} | "
                     f"${rec['cost']:.4f} | {rec.get('route', a.model)} | {rec['steps']} |\n\nActions: {', '.join(acted) or 'none'}\n\n"
                     f"### Draft reply\n\n{no_mentions(rec['reply'], repo)}\n")

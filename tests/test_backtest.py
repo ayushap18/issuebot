@@ -92,6 +92,11 @@ class LocalSearchTest(unittest.TestCase):
         for leak in ("#5", "#8", "future", "#4"):
             self.assertNotIn(leak, out)
 
+    def test_operators_and_exclusions_ignored(self):
+        with mock.patch.object(tools, "_search", side_effect=AssertionError("network")):
+            out = tools.search_issues(self.ctx, "pool OR crash AND NOT -later", 10)
+        self.assertIn("#3", out)
+
     def test_local_miss_falls_back_to_search(self):
         with mock.patch.object(tools, "_search", return_value=((2, "2026-01-01T00:00:00Z", "Remote", ""),)) as s:
             self.assertIn("#2", tools.search_issues(self.ctx, "nomatchword", 10))
@@ -110,6 +115,18 @@ class LocalSearchTest(unittest.TestCase):
             self.assertIn("since", p.call_args.args[1])
             self.assertEqual({i["number"]: i["title"] for i in got}, {1: "renamed", 3: "c"})
             self.assertEqual(got[0]["labels"], [{"name": "bug"}])
+
+
+class MainTest(unittest.TestCase):
+    def test_n_clamped_and_no_commit_field(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(backtest, "corpus", return_value=[]), \
+                mock.patch.object(backtest.build_eval, "build", return_value=[]) as build, \
+                mock.patch.object(backtest.agent, "make_client"), mock.patch.object(backtest, "clone"), \
+                mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": ""}), mock.patch("builtins.print"):
+            backtest.main(["o/r", "--n", "9999", "--out", f"{d}/r.json"])
+            res = json.loads(Path(d, "r.json").read_text())
+        self.assertEqual(build.call_args.args[1], 500)
+        self.assertNotIn("issuebot_commit", res)
 
 
 class ScorecardTest(unittest.TestCase):
@@ -135,6 +152,7 @@ class ScorecardTest(unittest.TestCase):
         self.assertEqual(len(worst), 10)
         self.assertTrue(worst[0].startswith("- [#4 title 4](https://github.com/o/r/issues/4) score 1 (wrong)"))
         self.assertTrue(worst[1].startswith("- [#3"))
+        self.assertIn("local retriever", md)
 
     def test_empty(self):
         self.assertIn("No scorable", backtest.scorecard({"repo": "o/r", "metrics": {"n": 0}, "cases": []}))

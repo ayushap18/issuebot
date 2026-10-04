@@ -39,11 +39,18 @@ class DashboardTest(unittest.TestCase):
                           {"bad/repo": {"kept_rate": 0.7, "n": 30, "status": "shadow"},
                            "live/only": {"kept_rate": 0.65, "n": 25, "status": "shadow"},
                            "new/repo": {"kept_rate": None, "n": 0, "status": "label"}})
-        order = [html.index(r) for r in ("bad/repo", "live/only", "good/repo", "new/repo")]
+        # live kept rate wins over offline accuracy: live/only 65% < bad/repo 70% (acc 60%) < good/repo acc 90%
+        order = [html.index(r) for r in ("live/only", "bad/repo", "good/repo", "new/repo")]
         self.assertEqual(order, sorted(order))
         self.assertIn("<td>60%</td>", html)
         self.assertIn("<td>70% (30)</td>", html)
         self.assertIn("<td>10</td>", html)  # results n, not the status n
+
+    def test_non_numeric_status_sorts_worst_and_renders(self):
+        html = self.build([res("ok/repo", 0.2)], {"odd/repo": {"kept_rate": "93%", "n": 5, "status": "label"},
+                                                  "bad/entry": "junk"})
+        self.assertLess(html.index("odd/repo"), html.index("ok/repo"))
+        self.assertIn("bad/entry", html)
 
     def test_escapes_html(self):
         html = self.build([res("<script>alert(1)</script>/r", 0.5, title='<img src=x onerror="a()">')])

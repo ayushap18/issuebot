@@ -17,12 +17,15 @@ td.t{white-space:normal;min-width:12em}.shadow{color:var(--bad)}.comment{color:v
 
 
 def _f(x, fmt="{:.0%}") -> str:
-    return "-" if x is None else fmt.format(x)
+    return fmt.format(x) if isinstance(x, (int, float)) else "-"
 
 
 def rows(results: Path, status: dict) -> list[dict]:
-    live = lambda r: {"kept": (status.get(r) or {}).get("kept_rate"), "live_n": (status.get(r) or {}).get("n"),
-                      "status": (status.get(r) or {}).get("status")}
+    def live(r):
+        s = status.get(r)
+        s = s if isinstance(s, dict) else {}
+        return {"kept": s.get("kept_rate"), "live_n": s.get("n"), "status": s.get("status")}
+
     out, seen = [], set()
     for p in sorted(results.glob("*.json")):
         try:
@@ -37,9 +40,11 @@ def rows(results: Path, status: dict) -> list[dict]:
                     "dup": m.get("dup_recall"), "judge": m.get("judge_mean"), "cpi": m.get("cost_per_issue"),
                     "worst": w, **live(repo)})
     out += [{"repo": r, "run": None, **live(r)} for r in status if r not in seen]
-    # worst first: offline label accuracy, else live kept rate; rows with neither go last
-    key = lambda r: r["acc"] if r.get("acc") is not None else r["kept"]
-    return sorted(out, key=lambda r: (key(r) is None, key(r) or 0, r["repo"]))
+    # worst first: live kept rate, else offline label accuracy; non-numeric counts as worst, rows with neither go last
+    def key(r):
+        v = r["kept"] if r["kept"] is not None else r.get("acc")
+        return v is None, v if isinstance(v, (int, float)) else -1, r["repo"]
+    return sorted(out, key=key)
 
 
 def render(rs: list[dict], now: str) -> str:
