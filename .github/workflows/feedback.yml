@@ -1,0 +1,42 @@
+name: feedback
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: write
+  issues: write
+jobs:
+  feedback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e .
+      - name: Score adopters' last week and collect misses
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          python -m issuebot.feedback | tee feedback.out
+      - name: Commit candidate files
+        run: |
+          mkdir -p eval/candidates && git add eval/candidates
+          if ! git diff --cached --quiet; then
+            git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com \
+              commit -m "Update feedback candidates"
+            git push
+          fi
+      - name: Open one drift issue per repo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for repo in $(grep '^DRIFT ' feedback.out | cut -d' ' -f2 | tr -d ':' | sort -u); do
+            title="Drift: $repo"
+            if gh issue list --state open --search "\"$title\" in:title" --json title -q '.[].title' | grep -qxF "$title"; then
+              echo "open issue exists: $title"; continue
+            fi
+            grep "^DRIFT $repo:" feedback.out | gh issue create --title "$title" --body-file -
+          done

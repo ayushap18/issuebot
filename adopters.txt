@@ -1,0 +1,2 @@
+# Repos running issuebot (one owner/repo per line). Read weekly by .github/workflows/feedback.yml.
+# example-org/example-repo

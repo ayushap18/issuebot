@@ -249,6 +249,10 @@ The issue title and body are wrapped in an `<issue>` block in the user turn (a l
 
 `ISSUEBOT_DRY_RUN=1` in the step env runs the guards, validates the config and renders the prompt, then prints the plan. It makes no model calls and no writes. The `action-smoke` job in `test.yml` runs the local action (`uses: ./`) this way on every push, against `tests/fixtures/issue_opened.json` (`ISSUEBOT_EVENT` overrides the event path), with no secrets.
 
+### Feedback loop
+
+`adopters.txt` lists repos running issuebot. `.github/workflows/feedback.yml` (weekly + manual) runs `python -m issuebot.feedback [--days 7]` from this repo; adopters send no telemetry. For issues created in the `--days` before the last 7 days (so every bot label has had 7 days) that carry a `bot:` label or the comment marker, it scores agreement: the label was kept 7 days (timeline `labeled`/`unlabeled`), or a maintainer confirmed the predicted `duplicate_of` (same rules as `gold()`). Misses with a maintainer reply are appended to `eval/candidates/<owner>__<repo>.jsonl` as dataset rows (`sha: null`, deduped by number). A repo whose agreement is more than 10pts under `eval/baseline.json` label accuracy, or whose bot label is gone from its label set, prints a `DRIFT` line; the workflow commits candidates and opens one `Drift: <repo>` issue (skipped while one is open). `python -m issuebot.feedback --promote [--min 20] [--force]` merges candidates into `eval/dataset.jsonl` (dedup by repo+number, SHA from a clone, new rows split by date among themselves so existing splits don't move) and clears them.
+
 ## Project layout
 
 ```
@@ -259,12 +263,14 @@ issuebot/
   run_eval.py     run agent/baseline/routed, score, write results/<name>.json, --compare, --gate,
                   --export-grading / --calibrate, --tag-failures
   judge.py        LLM-as-judge vs the maintainer's reply, failure-cause tagger
+  feedback.py     weekly adopter feedback: agreement, miss candidates, drift, --promote
 tests/            offline unittest suite (fake Anthropic client, httpx.MockTransport, temp git repos)
 eval/             dataset.jsonl, baseline.json + replay/ for the CI gate (not committed yet)
 results/          committed result files
 runs/             per-run JSONL traces (gitignored)
 examples/         example workflow and repo config (issuebot.toml) for adopters
-.github/workflows test.yml (offline tests), eval-gate.yml (regression gate on PRs)
+.github/workflows test.yml (offline tests), eval-gate.yml (regression gate on PRs), feedback.yml (weekly)
+adopters.txt      repos the feedback loop reads
 action.yml        composite GitHub Action
 PLAN.md           build plan and design decisions
 SCALING.md        what changes when this runs on many repos
