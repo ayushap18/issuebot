@@ -167,12 +167,12 @@ def route(issue: dict, ctx: dict, threshold: float = ROUTE_THRESHOLD, client=Non
     """Haiku triages; Sonnet drafts only when Haiku is unsure or the label needs a real reply."""
     client = client or make_client()
     tri = run(issue, ctx, TRIAGE_MODEL, client=client, runs_dir=None, ceiling=ceiling)
-    if tri["confidence"] >= threshold and tri["label"] not in REPLY_LABELS:
+    if tri["capped"] or (tri["confidence"] >= threshold and tri["label"] not in REPLY_LABELS):  # capped: no budget left for Sonnet
         rec, path, draft_cost = tri, "haiku", 0.0
     else:
         rec = run(issue, ctx, REPLY_MODEL, client=client, runs_dir=None, ceiling=ceiling - tri["cost"])
         path, draft_cost = "sonnet", rec["cost"]
-    rec = {**rec, "route": path, "triage": {k: tri[k] for k in ("label", "confidence", "cost")},
+    rec = {**rec, "route": path, "triage": {k: tri[k] for k in ("label", "confidence")},
            "triage_cost": tri["cost"], "draft_cost": draft_cost, "cost": tri["cost"] + draft_cost,
            "capped": tri["capped"] or rec["capped"],
            "latency_s": tri["latency_s"] + (rec["latency_s"] if path == "sonnet" else 0)}

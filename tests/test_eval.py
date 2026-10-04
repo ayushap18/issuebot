@@ -159,6 +159,11 @@ class GateTest(unittest.TestCase):
         self.assertIn("| label_accuracy | 0.900 | 0.500 | -0.400 |", out)
         self.assertIn("FAIL |", out)
 
+    def test_no_shared_cases_fails(self):
+        ok, out = self.gate(suite(10, n=10), [{**c, "number": c["number"] + 100} for c in suite(10, n=10)])
+        self.assertFalse(ok)
+        self.assertIn("no shared cases", out)
+
     def test_small_drop_within_floors_passes(self):
         ok, _ = self.gate(suite(10), suite(12))  # -2pts label, judge -0.06: under the floors
         self.assertTrue(ok)
@@ -199,8 +204,8 @@ class CalibrationTest(unittest.TestCase):
     def test_export_round_trip(self):
         rows = [{"number": i, "split": "dev", "title": f"t{i}", "body": "x" * 2000, "maintainer_reply": f"m{i}"}
                 for i in range(80)]
-        cases = [{**case(i, "bug", "bug", 0.9, 1 + i % 5, i % 2 == 0, 1.0), "reply": f"r{i}" if i < 70 else None}
-                 for i in range(80)]
+        cases = [{**case(i, "bug", "bug", 0.9, 1 + i % 5, i % 2 == 0, 1.0), "reply": f"r{i}" if i < 70 else None,
+                  "judge_reason": "j" if i < 68 else None} for i in range(80)]  # 68, 69: replied but judge failed
         with tempfile.TemporaryDirectory() as d:
             ds, res, sheet = Path(d) / "ds.jsonl", Path(d) / "r.json", Path(d) / "g.csv"
             ds.write_text("\n".join(map(json.dumps, rows)))
@@ -213,7 +218,7 @@ class CalibrationTest(unittest.TestCase):
             self.assertEqual(outs[0], outs[1])  # deterministic sample
             got = list(csv.DictReader(io.StringIO(outs[0])))
             self.assertEqual(len(got), 50)
-            self.assertTrue(all(int(r["number"]) < 70 and r["human_score"] == "" for r in got))  # replied cases only
+            self.assertTrue(all(int(r["number"]) < 68 and r["human_score"] == "" for r in got))  # replied and judged cases only
             self.assertEqual((len(got[0]["body"]), got[0]["agent_reply"]), (1500, f"r{got[0]['number']}"))
             for r in got:  # human agrees with the judge exactly
                 c = cases[int(r["number"])]
@@ -290,6 +295,10 @@ class TagFailuresTest(unittest.TestCase):
         self.assertFalse(met)  # 25% < 30%
         self.assertNotIn("STAGE 3 TRIGGER MET", printed)
 
+    def test_all_tag_errors_not_written(self):
+        with self.assertRaises(SystemExit):
+            self.run_tag(["bogus"] * 4)  # every tag call fails validation
+
 
 class RunCaseTest(unittest.TestCase):
     ROW = {"repo": "o/r", "number": 9, "title": "t", "body": "b", "created_at": "2026-01-01T00:00:00Z",
@@ -320,6 +329,11 @@ class RunCaseTest(unittest.TestCase):
         self.assertIn("net down", c["error"])
         self.assertIsNone(c["pred"])
         self.assertEqual((c["score"], c["wrong"]), (1, False))  # failures count in judge metrics
+        with mock.patch.object(run_eval, "checkout", return_value="/wt"), \
+                mock.patch.object(run_eval.agent, "run", return_value=self.REC), \
+                mock.patch.object(run_eval, "judge", side_effect=ValueError("bad json")):
+            c = run_eval.run_case(self.ROW, "/src", "agent", "m", client=None)
+        self.assertEqual((c["score"], c["wrong"], c["reply"]), (None, None, "r"))  # judge failure isn't a score
 
     def test_routed_mode_uses_route(self):
         with mock.patch.object(run_eval, "checkout", return_value="/wt"), \

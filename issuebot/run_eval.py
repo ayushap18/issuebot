@@ -21,10 +21,12 @@ from issuebot.tools import LABELS, SUBMIT, checkout, clone
 def load(path: str, split: str = "all", limit: int | None = None, stratify: bool = False) -> list[dict]:
     rows = [json.loads(l) for l in Path(path).read_text().splitlines() if l.strip()]
     rows = [r for r in rows if split == "all" or r["split"] == split]
-    if stratify and limit:  # round-robin over gold labels in file order: deterministic, balanced until a label runs out
+    if stratify and limit:  # seeded shuffle per label (file is time-sorted), then round-robin: balanced until a label runs out
         groups = {}
         for r in rows:
             groups.setdefault(r.get("label_override") or r["gold_label"], []).append(r)
+        for g in groups.values():
+            random.Random(0).shuffle(g)
         rows = [r for tier in itertools.zip_longest(*(groups[k] for k in sorted(groups))) for r in tier if r]
     return rows[:limit] if limit else rows
 
@@ -54,7 +56,7 @@ def run_case(row: dict, src: Path, mode: str, model: str, client, do_judge: bool
             case.update(score=j["score"], wrong=j["wrong"], judge_cost=j["cost"], judge_reason=j["reason"])
     except Exception as e:  # one broken case must not kill a 300-case run
         case["error"] = f"{type(e).__name__}: {e}"
-    if do_judge and case["score"] is None:  # no reply scores 1, so a flakier system isn't judged on an easier subset
+    if do_judge and case["score"] is None and not case["reply"]:  # no reply scores 1, so a flakier system isn't judged on an easier subset; judge errors stay None
         case.update(score=1, wrong=False)
     return case
 
@@ -170,6 +172,9 @@ def gate(pa: str, pb: str) -> bool:
     """Compare results pb to baseline pa on their shared cases; print a markdown table; True = pass."""
     a, b = (json.loads(Path(x).read_text())["cases"] for x in (pa, pb))
     shared = {c["number"] for c in a} & {c["number"] for c in b}
+    if not shared:
+        print("gate: no shared cases with baseline")
+        return False
     ma, mb = (metrics([c for c in cs if c["number"] in shared]) for cs in (a, b))
     lines, ok = [f"Eval gate: {pb} vs baseline {pa} ({len(shared)} shared cases)", "",
                  "| metric | baseline | new | delta | CI | verdict |", "|---|---|---|---|---|---|"], True
@@ -205,7 +210,7 @@ GRADE_COLS = ["number", "title", "body", "maintainer_reply", "agent_reply", "hum
 def export_grading(results: str, dataset: str, n: int = 50, out=sys.stdout, seed: int = 0) -> None:
     """Blind grading sheet: a seeded sample of replied cases, without the judge's score."""
     rows = {r["number"]: r for r in load(dataset)}
-    pool = sorted((c for c in json.loads(Path(results).read_text())["cases"] if c.get("reply")), key=lambda c: c["number"])
+    pool = sorted((c for c in json.loads(Path(results).read_text())["cases"] if c.get("reply") and c.get("judge_reason") is not None), key=lambda c: c["number"])
     w = csv.DictWriter(out, GRADE_COLS)
     w.writeheader()
     for c in sorted(random.Random(seed).sample(pool, min(n, len(pool))), key=lambda c: c["number"]):
@@ -245,6 +250,7 @@ def tag_failures(results: str, dataset: str, client=None) -> bool:
     rows = {r["number"]: r for r in load(dataset)}
     client = client or agent.make_client()
     fails = [c for c in res["cases"] if failed(c)]
+    errors = 0
     for c in fails:
         r = rows[c["number"]]
         try:
@@ -252,10 +258,13 @@ def tag_failures(results: str, dataset: str, client=None) -> bool:
             c.update(failure_tag=t["cause"], failure_reason=t["reason"])
         except Exception as e:  # untagged counts as other, so shares still sum over all failures
             c.update(failure_tag="other", failure_reason=f"tag error: {type(e).__name__}: {e}")
+            errors += 1
+    if fails and errors == len(fails):  # nothing tagged (no key, replay misses): don't save bogus tags
+        raise SystemExit(f"{errors} tag errors, all failures untagged; results not written")
     counts = {k: sum(c["failure_tag"] == k for c in fails) for k in CAUSES}
     res["failure_tags"] = counts
     Path(results).write_text(json.dumps(res, indent=1))
-    print(f"{len(fails)} failures of {len(res['cases'])} cases")
+    print(f"{len(fails)} failures of {len(res['cases'])} cases" + (f", {errors} tag errors" if errors else ""))
     for k, v in counts.items():
         print(f"{k:16} {v:4}  {_div(v, len(fails)):.1%}")
     met = bool(fails) and counts["retrieval_miss"] / len(fails) >= 0.3
@@ -320,6 +329,9 @@ def main() -> None:
     Path(f"results/{name}.json").write_text(json.dumps(out, indent=1))
     print(json.dumps({k: v for k, v in m.items() if not isinstance(v, dict)}, indent=1))
     print(f"wrote results/{name}.json")
+    if os.environ.get("ISSUEBOT_REPLAY") == "replay" and any("replay miss" in (c["error"] or "") for c in cases):
+        print("::notice::eval-gate skipped: replay cache misses (fork PR without API key)")
+        raise SystemExit(0)
     if a.gate:
         raise SystemExit(0 if gate(a.gate[0], f"results/{name}.json") else 1)
 

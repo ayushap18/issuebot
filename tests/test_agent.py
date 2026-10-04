@@ -121,6 +121,12 @@ class AgentTest(unittest.TestCase):
             self.assertAlmostEqual(rec["cost"], rec["triage_cost"] + rec["draft_cost"])
             self.assertGreater(rec["draft_cost"], rec["triage_cost"])
 
+    def test_route_capped_triage_stays_on_haiku(self):
+        fc, rec = self.route(msg(tool("list_docs", {"subdir": "docs"}), u=usage(200_000, 0)),  # $0.20 on Haiku
+                             msg(submit("feature", conf=0.5)))
+        self.assertEqual([c["model"] for c in fc.calls], [agent.TRIAGE_MODEL] * 2)
+        self.assertEqual((rec["route"], rec["capped"], rec["draft_cost"]), ("haiku", True, 0.0))
+
     def test_route_trace_one_combined_line(self):
         self.route(msg(submit("bug", conf=0.95)), msg(submit("bug", conf=0.9)))
         lines = next(Path(self.tmp.name).glob("*.jsonl")).read_text().splitlines()
