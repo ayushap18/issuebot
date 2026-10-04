@@ -130,6 +130,9 @@ class TestSearchIssues(unittest.TestCase):
 
         self.patch = mock.patch.object(tools, "_http", httpx.Client(transport=httpx.MockTransport(handler)))
         self.patch.start()
+        no_wait = mock.patch.object(tools, "_last_search", float("-inf"))  # no throttle sleep between tests
+        no_wait.start()
+        self.addCleanup(no_wait.stop)
         self.ctx = {"repo": "o/r", "dir": Path("."), "number": 5, "created_at": "2026-05-01T10:00:00Z"}
 
     def tearDown(self):

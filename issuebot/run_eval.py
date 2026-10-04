@@ -32,14 +32,14 @@ def load(path: str, split: str = "all", limit: int | None = None, stratify: bool
 
 
 def run_case(row: dict, src: Path, mode: str, model: str, client, do_judge: bool = True,
-             threshold: float = agent.ROUTE_THRESHOLD) -> dict:
+             threshold: float = agent.ROUTE_THRESHOLD, corpus: list | None = None) -> dict:
     gold = row.get("label_override") or row["gold_label"]
     case = {"number": row["number"], "created_at": row["created_at"], "gold": gold,
             "gold_dup": row.get("gold_duplicate_of"), "pred": None, "pred_dup": None, "confidence": 0.0,
             "score": None, "wrong": None, "cost": 0.0, "judge_cost": 0.0, "latency_s": None, "steps": 0, "error": None, "reply": None}
     try:
         ctx = {"repo": row["repo"], "dir": checkout(src, row["sha"]),
-               "number": row["number"], "created_at": row["created_at"]}
+               "number": row["number"], "created_at": row["created_at"], "corpus": corpus}
         issue = {k: row[k] for k in ("number", "title", "body", "created_at")}  # the agent sees nothing else
         if mode == "baseline":  # same prompt and output, no retrieval tools: a clean ablation on one code path
             rec = agent.run(issue, ctx, model, tools=[SUBMIT], max_steps=2, client=client)

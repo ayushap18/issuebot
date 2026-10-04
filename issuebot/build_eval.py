@@ -1,5 +1,6 @@
 """Pull closed issues with a maintainer reply into eval/dataset.jsonl, with gold labels and the SHA at issue time."""
 import argparse
+import itertools
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -64,6 +65,34 @@ def row(repo: str, i: dict, comments: list[dict], g: tuple) -> dict | None:
             "labels": [l["name"] for l in i["labels"]], "state_reason": i.get("state_reason")}
 
 
+def closed_issues(repo: str):
+    for page in itertools.count(1):
+        batch = gh(f"/repos/{repo}/issues", params={"state": "closed", "sort": "created", "direction": "desc",
+                                                    "per_page": 100, "page": page})
+        if not batch:
+            return
+        yield from batch
+
+
+def build(repo: str, limit: int, branch: str = "origin/HEAD", issues=None) -> list[dict]:
+    """Up to `limit` rows (with sha, split=None) from closed issues, newest first. `issues` defaults to the REST list."""
+    src = clone(repo)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = []
+    for i in closed_issues(repo) if issues is None else issues:
+        if ("pull_request" in i or i["user"]["type"] == "Bot" or i["author_association"] in MAINTAINER
+                or not (i.get("body") or "").strip() or i["created_at"] > cutoff):
+            continue
+        comments = gh(f"/repos/{repo}/issues/{i['number']}/comments", params={"per_page": 100})
+        if not (g := gold(i, comments)) or not (r := row(repo, i, comments, g)):
+            continue
+        rows.append({**r, "sha": sha_at(src, i["created_at"], branch)})
+        print(f"#{i['number']} {g[0]} ({len(rows)}/{limit})", flush=True)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default="vitest-dev/vitest")
@@ -72,26 +101,7 @@ def main() -> None:
     ap.add_argument("--branch", default="origin/HEAD")
     a = ap.parse_args()
 
-    src = clone(a.repo)
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    rows, page = [], 1
-    while len(rows) < a.limit:
-        batch = gh(f"/repos/{a.repo}/issues", params={"state": "closed", "sort": "created", "direction": "desc",
-                                                      "per_page": 100, "page": page})
-        if not batch:
-            break
-        page += 1
-        for i in batch:
-            if ("pull_request" in i or i["user"]["type"] == "Bot" or i["author_association"] in MAINTAINER
-                    or not (i.get("body") or "").strip() or i["created_at"] > cutoff):
-                continue
-            comments = gh(f"/repos/{a.repo}/issues/{i['number']}/comments", params={"per_page": 100})
-            if not (g := gold(i, comments)) or not (r := row(a.repo, i, comments, g)):
-                continue
-            rows.append({**r, "sha": sha_at(src, i["created_at"], a.branch)})
-            print(f"#{i['number']} {g[0]} ({len(rows)}/{a.limit})", flush=True)
-            if len(rows) >= a.limit:
-                break
+    rows = build(a.repo, a.limit, a.branch)
     rows.sort(key=lambda r: r["created_at"])
     for k, r in enumerate(rows):  # oldest 2/3 dev, newest 1/3 test (test is least likely to be memorized)
         r["split"] = "dev" if k < len(rows) * 2 // 3 else "test"

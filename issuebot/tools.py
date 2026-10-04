@@ -12,13 +12,19 @@ API = "https://api.github.com"
 CACHE = Path.home() / ".cache/issuebot"
 LABELS = ("question", "bug", "duplicate", "feature")
 _http = httpx.Client(timeout=30)  # tests swap this for one with httpx.MockTransport
+SEARCH_GAP = 60 / 25  # search API allows 30/min; stay at <= 25/min
+_last_search = 0.0
 
 
 def gh(path: str, method="GET", **kw) -> dict | list:
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     if tok := os.environ.get("GITHUB_TOKEN"):
         headers["Authorization"] = f"Bearer {tok}"
+    global _last_search
     for attempt in range(4):
+        if path.startswith("/search/"):  # ponytail: per-process spacing; parallel jobs on one token each get 25/min
+            time.sleep(max(0.0, _last_search + SEARCH_GAP - time.monotonic()))
+            _last_search = time.monotonic()
         r = _http.request(method, API + path, headers=headers, **kw)
         limited = r.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in r.headers
         if r.status_code in (403, 429) and limited and attempt < 3:
@@ -134,10 +140,21 @@ def _search(repo: str, created_at: str, query: str, n: int) -> tuple:
     return tuple((i["number"], i["created_at"], i["title"], (i.get("body") or "")[:400]) for i in items)
 
 
+def _local(corpus: list[dict], created_at: str, number: int, query: str, n: int) -> list[tuple]:
+    # ponytail: every-term substring match, newest first, not GitHub's ranking; SQLite FTS5 is the Stage 3 upgrade.
+    terms = [t.lower() for t in query.replace('"', " ").split() if ":" not in t]  # qualifiers dropped
+    hits = [i for i in corpus if i["created_at"] < created_at and i["number"] != number
+            and all(t in f"{i['title']}\n{i.get('body') or ''}".lower() for t in terms)]
+    hits.sort(key=lambda i: i["created_at"], reverse=True)
+    return [(i["number"], i["created_at"], i["title"], (i.get("body") or "")[:400]) for i in hits[:n]]
+
+
 def search_issues(ctx, query: str, max_results: int = 10) -> str:
     n = max(1, min(max_results or 10, 20))
+    # ctx["corpus"] (backtest's cached issue list) answers locally; only a local miss costs a search API call.
+    local = _local(ctx["corpus"], ctx["created_at"], ctx["number"], query, n) if ctx.get("corpus") else []
     # Recheck locally: the model writes `query` and qualifiers in it (created:>..., repo:...) can widen the filter.
-    hits = [h for h in _search(ctx["repo"], ctx["created_at"], query, n + 1)
+    hits = [h for h in local or _search(ctx["repo"], ctx["created_at"], query, n + 1)
             if h[0] != ctx["number"] and h[1] < ctx["created_at"]][:n]
     return "\n".join(f"#{num} ({d[:10]}) {t}\n  {b}" for num, d, t, b in hits) or "no results"
 
