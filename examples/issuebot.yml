@@ -1,0 +1,20 @@
+# Copy to .github/workflows/issuebot.yml in the repo you want triaged.
+name: issuebot
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: read
+  issues: write   # only used in label/comment modes
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: <owner>/issuebot@v1
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          mode: shadow

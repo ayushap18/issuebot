@@ -1,0 +1,37 @@
+name: issuebot
+description: Triage new issues and draft replies. Shadow mode by default (posts nothing).
+inputs:
+  anthropic-api-key:
+    required: true
+  github-token:
+    default: ${{ github.token }}
+  mode:
+    default: shadow
+    description: "shadow | label | comment"
+  model:
+    default: claude-sonnet-5-5
+  min-confidence:
+    default: "0.8"
+  label-map:
+    default: "{}"
+    description: 'JSON, e.g. {"bug":"bug","question":"question"}. Unmapped labels are never applied.'
+  max-steps:
+    default: "8"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+    - shell: bash
+      run: pip install -q "${{ github.action_path }}"
+    - shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        ISSUEBOT_MODE: ${{ inputs.mode }}
+        ISSUEBOT_MODEL: ${{ inputs.model }}
+        ISSUEBOT_MIN_CONFIDENCE: ${{ inputs.min-confidence }}
+        ISSUEBOT_LABEL_MAP: ${{ inputs.label-map }}
+        ISSUEBOT_MAX_STEPS: ${{ inputs.max-steps }}
+      run: python -m issuebot.agent --event "$GITHUB_EVENT_PATH" --repo-dir "$GITHUB_WORKSPACE"
