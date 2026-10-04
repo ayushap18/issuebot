@@ -202,20 +202,39 @@ jobs:
       - uses: ayushap18/issuebot@v1
         with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          mode: shadow
 ```
 
 | Input | Default | Notes |
 |---|---|---|
 | `anthropic-api-key` | required | |
 | `github-token` | `${{ github.token }}` | |
-| `mode` | `shadow` | `shadow` = summary only; `label` = apply a label; `comment` = label + post the draft reply |
+| `config` | `.github/issuebot.toml` | repo config path (see below) |
+| `mode` | config / `shadow` | blank inputs below fall back to the repo config, then its default |
 | `model` | `claude-sonnet-5-5` | |
-| `min-confidence` | `0.8` | nothing is written below this |
-| `label-map` | `{}` | JSON from issuebot labels to your repo's labels, e.g. `{"bug":"bug","question":"question"}`. Unmapped labels are never applied |
+| `min-confidence` | config / `0.8` | |
+| `label-map` | config / `{}` | JSON form of `label_map`, e.g. `{"bug":"bug"}`; replaces the file's table |
 | `max-steps` | `8` | |
+| `routed` | config / `false` | |
+| `threshold` | config / `0.8` | |
+
+### Repo config
+
+Optionally copy `examples/issuebot.toml` to `.github/issuebot.toml` (read with stdlib `tomllib` from the checkout; another path via the `config` input / `ISSUEBOT_CONFIG`, which must then exist). Every key is optional and validated strictly: an unknown key or a wrong type fails the run with a message naming each bad key. Precedence: an action input / `ISSUEBOT_*` env var that is set (non-blank) > the file > the default.
+
+| Key | Default | Notes |
+|---|---|---|
+| `mode` | `"shadow"` | `shadow` = summary only; `label` = apply a label; `comment` = label + post the draft reply |
 | `routed` | `false` | `true` = Haiku triage first; Sonnet drafts only when unsure or the label is bug/question |
 | `threshold` | `0.8` | routed mode confidence gate |
+| `min_confidence` | `0.8` | nothing is written below this |
+| `label_map` | `{}` | table from issuebot labels (`bug`, `question`, `feature`, `duplicate`) to your labels |
+| `label_prefix` | `"bot:"` | **Label rule:** a `label_map` entry is applied verbatim; any other label is applied as `label_prefix + label` (`bot:feature`). `""` = apply only mapped labels |
+| `docs` | `["docs"]` | doc dirs `list_docs` may list (its allowlist) |
+| `per_issue_cap_usd` | `0.15` | per-issue $ ceiling (`CEILING`) |
+| `monthly_issue_cap` | `0` | skip once more than this many issues were opened this month (one search call; 0 = unlimited). Also set an Anthropic workspace spend limit: that is the hard money cap |
+| `skip_new_accounts_days` | `7` | skip authors with `author_association` NONE whose account is younger than this (0 = off) |
+
+Skipped issues cost no model call and get a one-line job summary.
 
 Posted comments carry a footer saying they are an automated triage draft. The action only reads the repo, and only triggers on `issues.opened` (never `pull_request_target`).
 
@@ -233,7 +252,7 @@ tests/            offline unittest suite (fake Anthropic client, httpx.MockTrans
 eval/             dataset.jsonl, baseline.json + replay/ for the CI gate (not committed yet)
 results/          committed result files
 runs/             per-run JSONL traces (gitignored)
-examples/         example workflow for adopters
+examples/         example workflow and repo config (issuebot.toml) for adopters
 .github/workflows test.yml (offline tests), eval-gate.yml (regression gate on PRs)
 action.yml        composite GitHub Action
 PLAN.md           build plan and design decisions

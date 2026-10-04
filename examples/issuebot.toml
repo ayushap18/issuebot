@@ -1,0 +1,20 @@
+# Copy to .github/issuebot.toml in the repo you want triaged. Every key is optional; the values below are the defaults.
+# Action inputs (or ISSUEBOT_* env vars) that are set explicitly override this file. Unknown keys are an error.
+
+mode = "shadow"              # "shadow" (job summary only) | "label" | "comment" (label + draft reply)
+routed = false               # true = Haiku triage first, Sonnet drafts only when unsure or the label is bug/question
+threshold = 0.8              # routed mode: Haiku confidence below this escalates to Sonnet
+min_confidence = 0.8         # nothing is written to the issue below this
+
+# Label rule: an explicit label_map entry is applied verbatim; any other label is applied as label_prefix + label
+# (e.g. "bot:feature"). Set label_prefix = "" to apply only the labels mapped here.
+label_prefix = "bot:"
+
+docs = ["docs"]              # doc directories list_docs may list
+per_issue_cap_usd = 0.15     # stop tool calls past this $ per issue, then one submit-only step
+monthly_issue_cap = 0        # skip once this many issues were opened this month (0 = unlimited)
+skip_new_accounts_days = 7   # skip first-time authors (author_association NONE) with accounts younger than this (0 = off)
+
+[label_map]                  # keys: bug, question, feature, duplicate
+# bug = "bug"
+# question = "question"

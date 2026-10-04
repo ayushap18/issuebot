@@ -106,10 +106,16 @@ def read_file(ctx, path: str, start_line: int = 1, end_line: int | None = None) 
     return _cap("\n".join(f"{i}: {lines[i - 1]}" for i in range(start, end + 1)), 16000) or "(empty range)"
 
 
-def list_docs(ctx, subdir: str = "docs") -> str:
-    subdir = subdir or "docs"
-    _safe(ctx, subdir)
-    out = git("-C", str(ctx["dir"]), "ls-files", "--", f"{subdir}/**/*.md", f"{subdir}/*.md")
+def list_docs(ctx, subdir: str = "") -> str:
+    dirs = ctx.get("docs") or ["docs"]  # allowlist from the repo config's `docs`
+    if subdir:
+        sub = Path(os.path.normpath(subdir))
+        if not any(sub.is_relative_to(os.path.normpath(d)) for d in dirs):
+            raise ValueError(f"not a docs dir: {subdir} (allowed: {', '.join(dirs)})")
+        dirs = [str(sub)]
+    for d in dirs:
+        _safe(ctx, d)
+    out = git("-C", str(ctx["dir"]), "ls-files", "--", *(p for d in dirs for p in (f"{d}/**/*.md", f"{d}/*.md")))
     return _cap(out.strip(), 8000) or "no docs"
 
 
@@ -147,7 +153,7 @@ TOOLS = [
                               "end_line": {"type": "integer"}})},
     {"name": "list_docs", "strict": True,
      "description": "List markdown documentation files in the repo.",
-     "input_schema": _schema({"subdir": {"type": "string", "description": "Default 'docs'"}})},
+     "input_schema": _schema({"subdir": {"type": "string", "description": "One of the repo's doc dirs; empty = all of them"}})},
     {"name": "search_issues", "strict": True,
      "description": "Full-text search of this repo's issues created BEFORE the current issue. Returns number, date, title "
                     "and a body snippet. Use it to find duplicates. Use short keyword queries such as an error message "

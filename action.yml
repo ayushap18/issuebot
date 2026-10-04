@@ -5,23 +5,28 @@ inputs:
     required: true
   github-token:
     default: ${{ github.token }}
+  config:
+    default: ""
+    description: "Repo config TOML, relative to the checkout. Default .github/issuebot.toml (optional file)"
   mode:
-    default: shadow
-    description: "shadow | label | comment"
+    default: ""
+    description: "shadow | label | comment. Blank = config file, else shadow"
   model:
     default: claude-sonnet-5-5
   min-confidence:
-    default: "0.8"
+    default: ""
+    description: "Blank = config file, else 0.8"
   label-map:
-    default: "{}"
-    description: 'JSON, e.g. {"bug":"bug","question":"question"}. Unmapped labels are never applied.'
+    default: ""
+    description: 'JSON, e.g. {"bug":"bug"}. Mapped labels apply verbatim, others as label_prefix + label (default bot:). Blank = config file'
   max-steps:
     default: "8"
   routed:
-    default: "false"
-    description: "true = Haiku triage first, Sonnet drafts only when unsure or the label needs a reply"
+    default: ""
+    description: "true = Haiku triage first, Sonnet drafts only when unsure or the label needs a reply. Blank = config file, else false"
   threshold:
-    default: "0.8"
+    default: ""
+    description: "Blank = config file, else 0.8"
 runs:
   using: composite
   steps:
@@ -34,6 +39,7 @@ runs:
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
+        ISSUEBOT_CONFIG: ${{ inputs.config }}
         ISSUEBOT_MODE: ${{ inputs.mode }}
         ISSUEBOT_MODEL: ${{ inputs.model }}
         ISSUEBOT_MIN_CONFIDENCE: ${{ inputs.min-confidence }}

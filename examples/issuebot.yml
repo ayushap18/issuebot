@@ -17,4 +17,4 @@ jobs:
       - uses: <owner>/issuebot@v1
         with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          mode: shadow
+          # settings live in .github/issuebot.toml (see examples/issuebot.toml); inputs set here override it

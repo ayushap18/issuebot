@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest import mock
@@ -170,16 +171,20 @@ class ActionModeTest(unittest.TestCase):
     REC = {"label": "bug", "duplicate_of": None, "reply": "Need a repro.", "confidence": 0.9, "cost": 0.05,
            "steps": 3, "error": None}
 
-    def main(self, mode, label_map="{}", routed="false"):
+    def main(self, mode=None, label_map="{}", routed="false", toml=None, env=None):
         with tempfile.TemporaryDirectory() as d:
             ev = Path(d) / "event.json"
             ev.write_text(json.dumps({"issue": ISSUE, "repository": {"full_name": "o/r"}}))
+            if toml is not None:
+                (Path(d) / ".github").mkdir()
+                (Path(d) / ".github/issuebot.toml").write_text(toml)
             summary = Path(d) / "summary.md"
             env = {"GITHUB_STEP_SUMMARY": str(summary), "ISSUEBOT_LABEL_MAP": label_map, "ISSUEBOT_MIN_CONFIDENCE": "0.8",
-                   "ISSUEBOT_ROUTED": routed}
-            argv = ["issuebot", "--event", str(ev), "--repo-dir", d, "--mode", mode]
+                   "ISSUEBOT_ROUTED": routed, "ISSUEBOT_MODE": "", "ISSUEBOT_THRESHOLD": "", "ISSUEBOT_CONFIG": "",
+                   **(env or {})}
+            argv = ["issuebot", "--event", str(ev), "--repo-dir", d] + (["--mode", mode] if mode else [])
             with mock.patch.dict("os.environ", env), mock.patch("sys.argv", argv), \
-                    mock.patch.object(agent, "run", return_value=self.REC), \
+                    mock.patch.object(agent, "run", return_value=self.REC) as self.run_mock, \
                     mock.patch.object(agent, "route", return_value={**self.REC, "reply": "routed"}), \
                     mock.patch.object(agent, "gh") as gh, mock.patch("builtins.print"):
                 agent.main()
@@ -197,13 +202,120 @@ class ActionModeTest(unittest.TestCase):
     def test_label_mode_only_mapped_labels(self):
         gh, _ = self.main("label", '{"bug": "type: bug"}')
         gh.assert_called_once_with("/repos/o/r/issues/42/labels", "POST", json={"labels": ["type: bug"]})
-        gh, _ = self.main("label", '{"question": "q"}')
-        gh.assert_not_called()
+        gh, _ = self.main("label", '{"question": "q"}')  # unmapped -> label_prefix + label
+        gh.assert_called_once_with("/repos/o/r/issues/42/labels", "POST", json={"labels": ["bot:bug"]})
 
     def test_comment_mode_adds_footer(self):
         gh, _ = self.main("comment")
         body = gh.call_args.kwargs["json"]["body"]
         self.assertTrue(body.startswith("Need a repro.") and "issuebot" in body)
+
+    def test_config_file_applies_and_env_overrides_it(self):
+        toml = 'mode = "label"\nlabel_prefix = "ai/"\nper_issue_cap_usd = 0.05\ndocs = ["site"]\n'
+        gh, summary = self.main(toml=toml, label_map="")
+        gh.assert_called_once_with("/repos/o/r/issues/42/labels", "POST", json={"labels": ["ai/bug"]})
+        self.assertEqual(self.run_mock.call_args.kwargs["ceiling"], 0.05)
+        self.assertEqual(self.run_mock.call_args.args[1]["docs"], ["site"])
+        gh, _ = self.main(toml=toml, env={"ISSUEBOT_MODE": "shadow"})  # explicitly set env beats the file
+        gh.assert_not_called()
+        gh, _ = self.main("shadow", toml=toml)  # so does a CLI flag
+        gh.assert_not_called()
+
+    def test_explicit_config_path_must_exist(self):
+        with self.assertRaises(FileNotFoundError):
+            self.main(env={"ISSUEBOT_CONFIG": "nope.toml"})
+
+    def test_bad_env_value_is_a_config_error(self):
+        with self.assertRaisesRegex(ValueError, "routed: must be true or false"):
+            self.main(routed="yes")
+
+    def test_skipped_issue_runs_nothing(self):
+        with mock.patch.object(agent, "skip_reason", return_value="monthly issue cap reached"):
+            gh, summary = self.main("comment")
+        self.run_mock.assert_not_called()
+        gh.assert_not_called()
+        self.assertIn("skipped", summary)
+
+
+class ConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "issuebot.toml"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def load(self, toml=None, **kw):
+        if toml is not None:
+            self.path.write_text(toml)
+        return agent.load_config(self.path, **kw)
+
+    def test_defaults(self):
+        cfg = self.load()
+        self.assertEqual(cfg, {k: d for k, (d, _, _) in agent.CONFIG.items()})
+        self.assertEqual((cfg["mode"], cfg["label_prefix"], cfg["per_issue_cap_usd"], cfg["monthly_issue_cap"],
+                          cfg["skip_new_accounts_days"]), ("shadow", "bot:", agent.CEILING, 0, 7))
+
+    def test_example_file_is_valid_and_all_defaults(self):
+        self.assertEqual(agent.load_config(Path(__file__).parent.parent / "examples/issuebot.toml"), self.load())
+
+    def test_file_overrides(self):
+        cfg = self.load('mode = "comment"\nthreshold = 1\nmonthly_issue_cap = 50\n[label_map]\nbug = "type: bug"\n')
+        self.assertEqual((cfg["mode"], cfg["threshold"], cfg["monthly_issue_cap"], cfg["label_map"]),
+                         ("comment", 1, 50, {"bug": "type: bug"}))
+        self.assertEqual(cfg["min_confidence"], 0.8)
+
+    def test_validation_lists_every_bad_key(self):
+        with self.assertRaises(ValueError) as e:
+            self.load('mode = "loud"\nrouted = "yes"\nmonthly_issue_cap = 1.5\nmin_confidence = 2\ncolour = 1\n'
+                      'docs = "docs"\n[label_map]\nspam = "x"\n')
+        msg = str(e.exception)
+        for k in ("mode", "routed", "monthly_issue_cap", "min_confidence", "colour: unknown key", "docs", "label_map"):
+            self.assertIn(k, msg)
+        with self.assertRaisesRegex(ValueError, "skip_new_accounts_days"):
+            self.load("skip_new_accounts_days = true\n")  # bool is not an int here
+        self.path.unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.load(required=True)
+
+    def test_precedence_overrides_beat_file_beat_defaults(self):
+        cfg = self.load('mode = "label"\nthreshold = 0.5\n', overrides={"mode": "comment", "threshold": None})
+        self.assertEqual((cfg["mode"], cfg["threshold"], cfg["routed"]), ("comment", 0.5, False))
+        with self.assertRaisesRegex(ValueError, "flags/env"):
+            self.load(overrides={"label_map": ["bug"]})
+
+    def test_prefix_rule(self):
+        cfg = self.load('[label_map]\nbug = "type: bug"\n')
+        self.assertEqual(agent.applied_label("bug", cfg), "type: bug")
+        self.assertEqual(agent.applied_label("feature", cfg), "bot:feature")
+        self.assertIsNone(agent.applied_label(None, cfg))
+        cfg["label_prefix"] = ""
+        self.assertEqual(agent.applied_label("bug", cfg), "type: bug")
+        self.assertIsNone(agent.applied_label("feature", cfg))
+
+
+class SkipTest(unittest.TestCase):
+    CFG = {"skip_new_accounts_days": 7, "monthly_issue_cap": 0}
+
+    def skip(self, cfg, gh_ret, assoc="NONE"):
+        with mock.patch.object(agent, "gh", return_value=gh_ret) as gh:
+            return agent.skip_reason({**ISSUE, "author_association": assoc, "user": {"login": "u"}}, "o/r", cfg), gh
+
+    def test_new_account(self):
+        new = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        self.assertIn("7 days", self.skip(self.CFG, {"created_at": new})[0])
+        self.assertIsNone(self.skip(self.CFG, {"created_at": "2015-01-01T00:00:00Z"})[0])
+        why, gh = self.skip(self.CFG, {}, assoc="CONTRIBUTOR")
+        self.assertIsNone(why)
+        gh.assert_not_called()
+        self.assertIsNone(self.skip({**self.CFG, "skip_new_accounts_days": 0}, {})[0])
+
+    def test_monthly_cap(self):
+        cfg = {"skip_new_accounts_days": 0, "monthly_issue_cap": 10}
+        why, gh = self.skip(cfg, {"total_count": 11})
+        self.assertIn("cap", why)
+        self.assertIn(f"created:>={datetime.now(timezone.utc):%Y-%m}-01", gh.call_args.kwargs["params"]["q"])
+        self.assertIsNone(self.skip(cfg, {"total_count": 10})[0])
 
 
 class ReplayTest(unittest.TestCase):

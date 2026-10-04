@@ -100,6 +100,10 @@ class TestRepoTools(GitRepoTest):
     def test_list_docs(self):
         self.assertEqual(tools.list_docs(self.ctx, "docs"), "docs/guide.md")
         self.assertEqual(tools.list_docs(self.ctx, ""), "docs/guide.md")
+        self.assertEqual(tools.list_docs(self.ctx, "./docs/"), "docs/guide.md")
+        for bad in ["src", "docs/../src", "../docs"]:  # config `docs` is the allowlist
+            self.assertIn("not a docs dir", tools.call("list_docs", {"subdir": bad}, self.ctx)[0])
+        self.assertEqual(tools.list_docs({**self.ctx, "docs": ["site"]}, ""), "no docs")
 
 
 class TestSearchIssues(unittest.TestCase):

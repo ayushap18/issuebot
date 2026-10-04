@@ -40,6 +40,11 @@ The Batch API takes 50% off and stacks with cache discounts. A cache write costs
 - [ ] Frozen eval set and stored baseline (`eval/dataset.jsonl`, `eval/baseline.json`, `eval/replay/`); until committed the gate skips.
 - [ ] Test split scored only on release tags; cached prefix padded above 4096 tokens; Batch for single-turn calls; 2+ weeks shadow on a live repo.
 
+**Stage 1 status.**
+- [x] Per-repo config `.github/issuebot.toml` (TOML via stdlib `tomllib`, not YAML, so no new dependency), strictly validated: mode, routed, threshold, min_confidence, label_map, label_prefix (`bot:`), docs, per_issue_cap_usd, monthly_issue_cap, skip_new_accounts_days. Inputs/env > file > defaults.
+- [x] Monthly cap counts issues *opened* this month (one search call) rather than `bot:*` labels, so shadow runs and verbatim `label_map` labels count too.
+- [x] New-account skip (author_association NONE, account < 7 days) runs before any model call.
+
 Nothing beyond Stage 4 is planned. Split web/worker, persistent clone volumes or a Postgres issue mirror get considered only if queue wait p95 stays above 2 min for 3 days or GitHub/Anthropic 429s hit more than 1% of jobs. Otherwise infra stays frozen and the time goes into evals and writeups.
 
 ## Unit economics per issue

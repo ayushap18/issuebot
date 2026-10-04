@@ -4,7 +4,8 @@ import hashlib
 import json
 import os
 import time
-from datetime import datetime, timezone
+import tomllib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import anthropic
@@ -44,6 +45,74 @@ Reply rules: short (under 150 words), concrete, no greeting fluff. Point to the 
 If a bug report lacks a reproduction, ask for a minimal repro (StackBlitz or a repo).
 Never promise a fix or a release. If you are unsure, say what you checked and what is unclear.
 confidence = your honest probability the label is correct. 0.9 means you'd be wrong 1 time in 10."""
+
+def _num(lo, hi=float("inf")):
+    return lambda v: type(v) in (int, float) and lo <= v <= hi
+
+
+# key: (default, check, what a valid value looks like). Precedence: CLI flag / env (action input) > file > default.
+CONFIG = {
+    "mode": ("shadow", lambda v: v in ("shadow", "label", "comment"), '"shadow", "label" or "comment"'),
+    "routed": (False, lambda v: type(v) is bool, "true or false"),
+    "threshold": (ROUTE_THRESHOLD, _num(0, 1), "a number from 0 to 1"),
+    "min_confidence": (0.8, _num(0, 1), "a number from 0 to 1"),
+    "label_map": ({}, lambda v: isinstance(v, dict) and all(k in LABELS and isinstance(x, str) and x for k, x in v.items()),
+                  f"a table from {'/'.join(LABELS)} to your label names"),
+    "label_prefix": ("bot:", lambda v: isinstance(v, str), "a string"),
+    "docs": (["docs"], lambda v: isinstance(v, list) and all(isinstance(x, str) and x for x in v), "a list of directories"),
+    "per_issue_cap_usd": (CEILING, lambda v: _num(0)(v) and v > 0, "a number > 0"),
+    "monthly_issue_cap": (0, lambda v: type(v) is int and v >= 0, "an integer >= 0 (0 = unlimited)"),
+    "skip_new_accounts_days": (7, lambda v: type(v) is int and v >= 0, "an integer >= 0 (0 = off)"),
+}
+
+
+def check_config(cfg: dict, source: str) -> dict:
+    errs = [f"  {k}: unknown key (allowed: {', '.join(CONFIG)})" if k not in CONFIG else
+            f"  {k}: must be {CONFIG[k][2]}, got {v!r}" for k, v in cfg.items() if k not in CONFIG or not CONFIG[k][1](v)]
+    if errs:
+        raise ValueError(f"invalid issuebot config ({source}):\n" + "\n".join(errs))
+    return cfg
+
+
+def load_config(path: Path, required: bool = False, overrides: dict | None = None) -> dict:
+    """Defaults, then the repo's TOML file, then explicitly set flags/env (None = not set)."""
+    cfg = {k: d for k, (d, _, _) in CONFIG.items()}
+    if path.exists():
+        with open(path, "rb") as f:
+            cfg |= check_config(tomllib.load(f), str(path))
+    elif required:
+        raise FileNotFoundError(f"issuebot config not found: {path}")
+    return cfg | check_config({k: v for k, v in (overrides or {}).items() if v is not None}, "flags/env")
+
+
+def applied_label(label: str | None, cfg: dict) -> str | None:
+    """An explicit label_map entry is used verbatim; otherwise label_prefix + label. Empty prefix = only mapped labels."""
+    if label in cfg["label_map"]:
+        return cfg["label_map"][label]
+    return cfg["label_prefix"] + label if label and cfg["label_prefix"] else None
+
+
+def skip_reason(issue: dict, repo: str, cfg: dict) -> str | None:
+    """Free pre-filters (no model call): new drive-by accounts, then the monthly issue cap."""
+    days, cap, now = cfg["skip_new_accounts_days"], cfg["monthly_issue_cap"], datetime.now(timezone.utc)
+    if days and issue.get("author_association") == "NONE":
+        made = datetime.fromisoformat(gh(f"/users/{issue['user']['login']}")["created_at"])
+        if now - made < timedelta(days=days):
+            return f"author account is under {days} days old"
+    if cap:
+        # Stateless month-to-date count: issues opened this month (shadow runs too). ponytail: search indexing lag
+        # can miss the current issue, so the cap may let one extra through; keep a workspace spend limit as the hard cap.
+        q = f"repo:{repo} is:issue created:>={now:%Y-%m}-01"
+        n = gh("/search/issues", params={"q": q, "per_page": 1})["total_count"]
+        if n > cap:
+            return f"monthly issue cap reached ({n} issues opened this month, cap {cap})"
+    return None
+
+
+def _env(name: str, conv=str):
+    v = os.environ.get(name)
+    return conv(v) if v else None  # empty = action input left blank = not set
+
 
 FOOTER = "\n\n---\n_Automated triage draft (issuebot). A maintainer will follow up._"
 
@@ -187,12 +256,15 @@ def main() -> None:
     ap.add_argument("--issue", type=int, help="live mode: issue number")
     ap.add_argument("--event", help="Action mode: path to the issues event payload")
     ap.add_argument("--repo-dir", default=".")
-    ap.add_argument("--mode", default=os.environ.get("ISSUEBOT_MODE", "shadow"), choices=["shadow", "label", "comment"])
+    ap.add_argument("--config", default=os.environ.get("ISSUEBOT_CONFIG"),
+                    help="repo config TOML, relative to the repo checkout (default .github/issuebot.toml)")
+    ap.add_argument("--mode", default=_env("ISSUEBOT_MODE"), choices=["shadow", "label", "comment"])
     ap.add_argument("--model", default=os.environ.get("ISSUEBOT_MODEL", REPLY_MODEL))
     ap.add_argument("--max-steps", type=int, default=int(os.environ.get("ISSUEBOT_MAX_STEPS", MAX_STEPS)))
-    ap.add_argument("--routed", action="store_true", default=os.environ.get("ISSUEBOT_ROUTED") == "true",
+    ap.add_argument("--routed", action="store_true",
+                    default=_env("ISSUEBOT_ROUTED", lambda v: {"true": True, "false": False}.get(v.lower(), v)),
                     help="Haiku triage first, Sonnet only when needed (ignores --model/--max-steps)")
-    ap.add_argument("--threshold", type=float, default=float(os.environ.get("ISSUEBOT_THRESHOLD", ROUTE_THRESHOLD)))
+    ap.add_argument("--threshold", type=float, default=_env("ISSUEBOT_THRESHOLD", float))
     a = ap.parse_args()
 
     if a.event:
@@ -204,25 +276,35 @@ def main() -> None:
         repo, issue = a.repo, gh(f"/repos/{a.repo}/issues/{a.issue}")
         src = clone(repo)
         d = checkout(src, sha_at(src, issue["created_at"]))
-    ctx = {"repo": repo, "dir": d, "number": issue["number"], "created_at": issue["created_at"]}
-    rec = route(issue, ctx, a.threshold) if a.routed else run(issue, ctx, a.model, max_steps=a.max_steps)
+    cfg = load_config(Path(d) / (a.config or ".github/issuebot.toml"), required=bool(a.config), overrides={
+        "mode": a.mode, "routed": a.routed, "threshold": a.threshold,
+        "min_confidence": _env("ISSUEBOT_MIN_CONFIDENCE", float), "label_map": _env("ISSUEBOT_LABEL_MAP", json.loads)})
+    n, mode, min_conf = issue["number"], cfg["mode"], cfg["min_confidence"]
+    if a.event and (why := skip_reason(issue, repo, cfg)):
+        if path := os.environ.get("GITHUB_STEP_SUMMARY"):
+            with open(path, "a") as f:
+                f.write(f"## issuebot: #{n} skipped\n\n{why}\n")
+        print(json.dumps({"skipped": why}))
+        return
+    ctx = {"repo": repo, "dir": d, "number": n, "created_at": issue["created_at"], "docs": cfg["docs"]}
+    ceiling = cfg["per_issue_cap_usd"]
+    rec = (route(issue, ctx, cfg["threshold"], ceiling=ceiling) if cfg["routed"]
+           else run(issue, ctx, a.model, max_steps=a.max_steps, ceiling=ceiling))
 
     if not a.event:
         print(json.dumps(rec, indent=2))
         return
     acted = []
-    label_map = json.loads(os.environ.get("ISSUEBOT_LABEL_MAP") or "{}")
-    min_conf = float(os.environ.get("ISSUEBOT_MIN_CONFIDENCE", "0.8"))
-    n = issue["number"]
-    if a.mode in ("label", "comment") and rec["confidence"] >= min_conf and rec["label"] in label_map:
-        gh(f"/repos/{repo}/issues/{n}/labels", "POST", json={"labels": [label_map[rec["label"]]]})
-        acted.append(f"labeled {label_map[rec['label']]}")
-    if a.mode == "comment" and rec["reply"] and rec["confidence"] >= min_conf:
+    label = applied_label(rec["label"], cfg)
+    if mode in ("label", "comment") and rec["confidence"] >= min_conf and label:
+        gh(f"/repos/{repo}/issues/{n}/labels", "POST", json={"labels": [label]})
+        acted.append(f"labeled {label}")
+    if mode == "comment" and rec["reply"] and rec["confidence"] >= min_conf:
         gh(f"/repos/{repo}/issues/{n}/comments", "POST", json={"body": rec["reply"] + FOOTER})
         acted.append("commented")
     if path := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(path, "a") as f:
-            f.write(f"## issuebot: #{n} ({a.mode})\n\n| label | duplicate_of | confidence | cost | steps |\n"
+            f.write(f"## issuebot: #{n} ({mode})\n\n| label | duplicate_of | confidence | cost | steps |\n"
                     f"|---|---|---|---|---|\n| {rec['label']} | {rec['duplicate_of'] or '-'} | {rec['confidence']:.2f} | "
                     f"${rec['cost']:.4f} | {rec['steps']} |\n\nActions: {', '.join(acted) or 'none'}\n\n"
                     f"### Draft reply\n\n{rec['reply']}\n")
